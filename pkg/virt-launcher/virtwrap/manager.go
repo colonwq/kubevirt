@@ -26,9 +26,11 @@ package virtwrap
 */
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -43,17 +45,17 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/emptydisk"
 	ephemeraldisk "kubevirt.io/kubevirt/pkg/ephemeral-disk"
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	"kubevirt.io/kubevirt/pkg/hooks"
 	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
-	"kubevirt.io/kubevirt/pkg/log"
-	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	migrationproxy "kubevirt.io/kubevirt/pkg/virt-handler/migration-proxy"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
@@ -64,9 +66,11 @@ import (
 )
 
 const LibvirtLocalConnectionPort = 22222
+const gpuEnvPrefix = "GPU_PASSTHROUGH_DEVICES"
+const vgpuEnvPrefix = "VGPU_PASSTHROUGH_DEVICES"
 
 type DomainManager interface {
-	SyncVMI(*v1.VirtualMachineInstance, bool) (*api.DomainSpec, error)
+	SyncVMI(*v1.VirtualMachineInstance, bool, *cmdv1.VirtualMachineOptions) (*api.DomainSpec, error)
 	KillVMI(*v1.VirtualMachineInstance) error
 	DeleteVMI(*v1.VirtualMachineInstance) error
 	SignalShutdownVMI(*v1.VirtualMachineInstance) error
@@ -242,7 +246,7 @@ func (l *LibvirtDomainManager) setMigrationResultHelper(vmi *v1.VirtualMachineIn
 
 }
 
-func prepareMigrationFlags(isBlockMigration bool, isUnsafeMigration bool) libvirt.DomainMigrateFlags {
+func prepareMigrationFlags(isBlockMigration bool, isUnsafeMigration bool, allowAutoConverge bool) libvirt.DomainMigrateFlags {
 	migrateFlags := libvirt.MIGRATE_LIVE | libvirt.MIGRATE_PEER2PEER
 
 	if isBlockMigration {
@@ -250,6 +254,9 @@ func prepareMigrationFlags(isBlockMigration bool, isUnsafeMigration bool) libvir
 	}
 	if isUnsafeMigration {
 		migrateFlags |= libvirt.MIGRATE_UNSAFE
+	}
+	if allowAutoConverge {
+		migrateFlags |= libvirt.MIGRATE_AUTO_CONVERGE
 	}
 	return migrateFlags
 
@@ -283,7 +290,8 @@ func classifyVolumesForMigration(vmi *v1.VirtualMachineInstance) *migrationDisks
 			disks.shared[volume.Name] = true
 		}
 		if volSrc.ConfigMap != nil || volSrc.Secret != nil ||
-			volSrc.ServiceAccount != nil || volSrc.CloudInitNoCloud != nil {
+			volSrc.ServiceAccount != nil || volSrc.CloudInitNoCloud != nil ||
+			volSrc.CloudInitConfigDrive != nil || volSrc.ContainerDisk != nil {
 			disks.generated[volume.Name] = true
 		}
 	}
@@ -375,7 +383,7 @@ func (l *LibvirtDomainManager) asyncMigrate(vmi *v1.VirtualMachineInstance, opti
 			return
 		}
 
-		migrateFlags := prepareMigrationFlags(isBlockMigration, options.UnsafeMigration)
+		migrateFlags := prepareMigrationFlags(isBlockMigration, options.UnsafeMigration, options.AllowAutoConverge)
 		if options.UnsafeMigration {
 			log.Log.Object(vmi).Info("UNSAFE_MIGRATION flag is set, libvirt's migration checks will be disabled!")
 		}
@@ -626,12 +634,48 @@ func (l *LibvirtDomainManager) PrepareMigrationTarget(vmi *v1.VirtualMachineInst
 		logger.Reason(err).Error("failed to read pod cpuset.")
 		return fmt.Errorf("failed to read pod cpuset: %v", err)
 	}
+	// Check if PVC volumes are block volumes
+	isBlockPVCMap := make(map[string]bool)
+	isBlockDVMap := make(map[string]bool)
+	diskInfo := make(map[string]*containerdisk.DiskInfo)
+	for i, volume := range vmi.Spec.Volumes {
+		if volume.VolumeSource.PersistentVolumeClaim != nil {
+			isBlockPVC, err := isBlockDeviceVolume(volume.Name)
+			if err != nil {
+				logger.Reason(err).Errorf("failed to detect volume mode for Volume %v and PVC %v.",
+					volume.Name, volume.VolumeSource.PersistentVolumeClaim.ClaimName)
+				return err
+			}
+			isBlockPVCMap[volume.Name] = isBlockPVC
+		} else if volume.VolumeSource.ContainerDisk != nil {
+			image, err := containerdisk.GetDiskTargetPartFromLauncherView(i)
+			if err != nil {
+				return err
+			}
+			info, err := GetImageInfo(image)
+			if err != nil {
+				return err
+			}
+			diskInfo[volume.Name] = info
+		} else if volume.VolumeSource.DataVolume != nil {
+			isBlockDV, err := isBlockDeviceVolume(volume.Name)
+			if err != nil {
+				logger.Reason(err).Errorf("failed to detect volume mode for Volume %v and DataVolume %v.",
+					volume.Name, volume.VolumeSource.DataVolume.Name)
+				return err
+			}
+			isBlockDVMap[volume.Name] = isBlockDV
+		}
 
+	}
 	// Map the VirtualMachineInstance to the Domain
 	c := &api.ConverterContext{
 		VirtualMachine: vmi,
 		UseEmulation:   useEmulation,
 		CPUSet:         podCPUSet,
+		IsBlockPVC:     isBlockPVCMap,
+		IsBlockDV:      isBlockDVMap,
+		DiskType:       diskInfo,
 	}
 	if err := api.Convert_v1_VirtualMachine_To_api_Domain(vmi, domain, c); err != nil {
 		return fmt.Errorf("conversion failed: %v", err)
@@ -687,14 +731,12 @@ func (l *LibvirtDomainManager) preStartHook(vmi *v1.VirtualMachineInstance, doma
 	logger := log.Log.Object(vmi)
 
 	logger.Info("Executing PreStartHook on VMI pod environment")
-	// ensure registry disk files have correct ownership privileges
-	err := containerdisk.SetFilePermissions(vmi)
-	if err != nil {
-		return domain, fmt.Errorf("setting registry-disk file permissions failed: %v", err)
-	}
 
 	// generate cloud-init data
-	cloudInitData := cloudinit.GetCloudInitNoCloudSource(vmi)
+	cloudInitData, err := cloudinit.ReadCloudInitVolumeDataSource(vmi)
+	if err != nil {
+		return domain, fmt.Errorf("PreCloudInitIso hook failed: %v", err)
+	}
 
 	// Pass cloud-init data to PreCloudInitIso hook
 	logger.Info("Starting PreCloudInitIso hook")
@@ -705,9 +747,7 @@ func (l *LibvirtDomainManager) preStartHook(vmi *v1.VirtualMachineInstance, doma
 	}
 
 	if cloudInitData != nil {
-		hostname := dns.SanitizeHostname(vmi)
-
-		err := cloudinit.GenerateLocalData(vmi.Name, hostname, vmi.Namespace, cloudInitData)
+		err := cloudinit.GenerateLocalData(vmi.Name, vmi.Namespace, cloudInitData)
 		if err != nil {
 			return domain, fmt.Errorf("generating local cloud-init data failed: %v", err)
 		}
@@ -737,6 +777,11 @@ func (l *LibvirtDomainManager) preStartHook(vmi *v1.VirtualMachineInstance, doma
 		return domain, fmt.Errorf("preparing host-disks failed: %v", err)
 	}
 
+	// Create ephemeral disk for container disks
+	err = containerdisk.CreateEphemeralImages(vmi)
+	if err != nil {
+		return domain, fmt.Errorf("preparing ephemeral container disk images failed: %v", err)
+	}
 	// Create images for volumes that are marked ephemeral.
 	err = ephemeraldisk.CreateEphemeralImages(vmi)
 	if err != nil {
@@ -828,7 +873,39 @@ func getSRIOVPCIAddresses(ifaces []v1.Interface) map[string][]string {
 	return networkToAddressesMap
 }
 
-func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulation bool) (*api.DomainSpec, error) {
+// This function parses all environment variables with prefix string that is set by a Device Plugin.
+// Device plugin that passes GPU devices by setting these env variables is https://github.com/NVIDIA/kubevirt-gpu-device-plugin
+// It returns address list for devices set in the env variable.
+// The format is as follows:
+// "":for no address set
+// "<address_1>,": for a single address
+// "<address_1>,<address_2>[,...]": for multiple addresses
+func getEnvAddressListByPrefix(evnPrefix string) []string {
+	var returnAddr []string
+	for _, env := range os.Environ() {
+		split := strings.Split(env, "=")
+		if strings.HasPrefix(split[0], evnPrefix) {
+			returnAddr = append(returnAddr, parseDeviceAddress(split[1])...)
+		}
+	}
+	return returnAddr
+}
+
+func parseDeviceAddress(addrString string) []string {
+	addrs := strings.Split(addrString, ",")
+	naddrs := len(addrs)
+	if naddrs > 0 {
+		if addrs[naddrs-1] == "" {
+			addrs = addrs[:naddrs-1]
+		}
+	}
+
+	for index, element := range addrs {
+		addrs[index] = strings.TrimSpace(element)
+	}
+	return addrs
+}
+func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulation bool, options *cmdv1.VirtualMachineOptions) (*api.DomainSpec, error) {
 	l.domainModifyLock.Lock()
 	defer l.domainModifyLock.Unlock()
 
@@ -843,7 +920,9 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 
 	// Check if PVC volumes are block volumes
 	isBlockPVCMap := make(map[string]bool)
-	for _, volume := range vmi.Spec.Volumes {
+	isBlockDVMap := make(map[string]bool)
+	diskInfo := make(map[string]*containerdisk.DiskInfo)
+	for i, volume := range vmi.Spec.Volumes {
 		if volume.VolumeSource.PersistentVolumeClaim != nil {
 			isBlockPVC, err := isBlockDeviceVolume(volume.Name)
 			if err != nil {
@@ -852,6 +931,24 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 				return nil, err
 			}
 			isBlockPVCMap[volume.Name] = isBlockPVC
+		} else if volume.VolumeSource.ContainerDisk != nil {
+			image, err := containerdisk.GetDiskTargetPartFromLauncherView(i)
+			if err != nil {
+				return nil, err
+			}
+			info, err := GetImageInfo(image)
+			if err != nil {
+				return nil, err
+			}
+			diskInfo[volume.Name] = info
+		} else if volume.VolumeSource.DataVolume != nil {
+			isBlockDV, err := isBlockDeviceVolume(volume.Name)
+			if err != nil {
+				logger.Reason(err).Errorf("failed to detect volume mode for Volume %v and DV %v.",
+					volume.Name, volume.VolumeSource.DataVolume.Name)
+				return nil, err
+			}
+			isBlockDVMap[volume.Name] = isBlockDV
 		}
 	}
 
@@ -861,7 +958,14 @@ func (l *LibvirtDomainManager) SyncVMI(vmi *v1.VirtualMachineInstance, useEmulat
 		UseEmulation:   useEmulation,
 		CPUSet:         podCPUSet,
 		IsBlockPVC:     isBlockPVCMap,
+		IsBlockDV:      isBlockDVMap,
+		DiskType:       diskInfo,
 		SRIOVDevices:   getSRIOVPCIAddresses(vmi.Spec.Domain.Devices.Interfaces),
+		GpuDevices:     getEnvAddressListByPrefix(gpuEnvPrefix),
+		VgpuDevices:    getEnvAddressListByPrefix(vgpuEnvPrefix),
+	}
+	if options != nil && options.VirtualMachineSMBios != nil {
+		c.SMBios = options.VirtualMachineSMBios
 	}
 	if err := api.Convert_v1_VirtualMachine_To_api_Domain(vmi, domain, c); err != nil {
 		logger.Error("Conversion failed.")
@@ -1149,4 +1253,20 @@ func (l *LibvirtDomainManager) GetDomainStats() ([]*stats.DomainStats, error) {
 	flags := libvirt.CONNECT_GET_ALL_DOMAINS_STATS_RUNNING
 
 	return l.virConn.GetDomainStats(statsTypes, flags)
+}
+
+func GetImageInfo(imagePath string) (*containerdisk.DiskInfo, error) {
+
+	out, err := exec.Command(
+		"/usr/bin/qemu-img", "info", imagePath, "--output", "json",
+	).Output()
+	if err != nil {
+		return nil, fmt.Errorf("failed to invoke qemu-img: %v", err)
+	}
+	info := &containerdisk.DiskInfo{}
+	err = json.Unmarshal(out, info)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse disk info: %v", err)
+	}
+	return info, err
 }

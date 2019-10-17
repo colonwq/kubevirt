@@ -23,6 +23,8 @@ package v1alpha1
 import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	conditions "github.com/openshift/custom-resource-status/conditions/v1"
 )
 
 // DataVolume provides a representation of our data volume
@@ -152,6 +154,12 @@ const (
 	// CloneInProgress represents a data volume with a current phase of CloneInProgress
 	CloneInProgress DataVolumePhase = "CloneInProgress"
 
+	// SnapshotForSmartCloneInProgress represents a data volume with a current phase of SnapshotForSmartCloneInProgress
+	SnapshotForSmartCloneInProgress DataVolumePhase = "SnapshotForSmartCloneInProgress"
+
+	// SmartClonePVCInProgress represents a data volume with a current phase of SmartClonePVCInProgress
+	SmartClonePVCInProgress DataVolumePhase = "SmartClonePVCInProgress"
+
 	// UploadScheduled represents a data volume with a current phase of UploadScheduled
 	UploadScheduled DataVolumePhase = "UploadScheduled"
 
@@ -165,6 +173,9 @@ const (
 	// Unknown represents a DataVolumePhase of Unknown
 	Unknown DataVolumePhase = "Unknown"
 )
+
+// DataVolumeCloneSourceSubresource is the subresource checked for permission to clone
+const DataVolumeCloneSourceSubresource = "source"
 
 // this has to be here otherwise informer-gen doesn't recognize it
 // see https://github.com/kubernetes/code-generator/issues/59
@@ -195,11 +206,11 @@ type CDIPhase string
 
 // CDIStatus defines the status of the CDI installation
 type CDIStatus struct {
-	Phase           CDIPhase       `json:"phase,omitempty"`
-	Conditions      []CDICondition `json:"conditions,omitempty" optional:"true"`
-	OperatorVersion string         `json:"operatorVersion,omitempty" optional:"true"`
-	TargetVersion   string         `json:"targetVersion,omitempty" optional:"true"`
-	ObservedVersion string         `json:"observedVersion,omitempty" optional:"true"`
+	Phase           CDIPhase               `json:"phase,omitempty"`
+	Conditions      []conditions.Condition `json:"conditions,omitempty" optional:"true"`
+	OperatorVersion string                 `json:"operatorVersion,omitempty" optional:"true"`
+	TargetVersion   string                 `json:"targetVersion,omitempty" optional:"true"`
+	ObservedVersion string                 `json:"observedVersion,omitempty" optional:"true"`
 }
 
 const (
@@ -217,24 +228,9 @@ const (
 
 	// CDIPhaseError signals that the CDI deployment is in an error state
 	CDIPhaseError CDIPhase = "Error"
-)
 
-// CDICondition represents a condition of a CDI deployment
-type CDICondition struct {
-	Type               CDIConditionType       `json:"type"`
-	Status             corev1.ConditionStatus `json:"status"`
-	LastProbeTime      metav1.Time            `json:"lastProbeTime,omitempty"`
-	LastTransitionTime metav1.Time            `json:"lastTransitionTime,omitempty"`
-	Reason             string                 `json:"reason,omitempty"`
-	Message            string                 `json:"message,omitempty"`
-}
-
-// CDIConditionType is the type of CDI condition
-type CDIConditionType string
-
-const (
-	// CDIConditionRunning means the CDI deployment is up/ready/healthy
-	CDIConditionRunning CDIConditionType = "Running"
+	// CDIPhaseUpgrading signals that the CDI resources are being deployed
+	CDIPhaseUpgrading CDIPhase = "Upgrading"
 )
 
 //CDIList provides the needed parameters to do request a list of CDIs from the system

@@ -28,10 +28,10 @@ import (
 	"strings"
 	"time"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
+	"kubevirt.io/client-go/precond"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
-	"kubevirt.io/kubevirt/pkg/log"
-	"kubevirt.io/kubevirt/pkg/precond"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/watchdog"
 )
@@ -108,26 +108,12 @@ func GracefulShutdownTriggerInitiate(triggerFile string) error {
 }
 
 func InitializePrivateDirectories(baseDir string) error {
-	unixPathVNC := filepath.Join(baseDir, "virt-vnc")
-	unixPathConsole := filepath.Join(baseDir, "virt-serial0")
-
-	err := os.MkdirAll(filepath.Dir(unixPathVNC), 0755)
-	if err != nil {
+	if err := os.MkdirAll(baseDir, 0755); err != nil {
 		return err
 	}
-	err = os.MkdirAll(filepath.Dir(unixPathConsole), 0755)
-	if err != nil {
+	if err := diskutils.SetFileOwnership("qemu", baseDir); err != nil {
 		return err
 	}
-	err = diskutils.SetFileOwnership("qemu", filepath.Dir(unixPathVNC))
-	if err != nil {
-		return err
-	}
-	err = diskutils.SetFileOwnership("qemu", filepath.Dir(unixPathConsole))
-	if err != nil {
-		return err
-	}
-
 	return nil
 }
 

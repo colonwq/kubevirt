@@ -30,13 +30,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 )
 
 var _ = Describe("Validating VMIRS Admitter", func() {
-	config, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
+	config, _, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
 	vmirsAdmitter := &VMIRSAdmitter{ClusterConfig: config}
 
 	table.DescribeTable("should reject documents containing unknown or missing fields for", func(data string, validationResult string, gvr metav1.GroupVersionResource, review func(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse) {
@@ -75,7 +75,7 @@ var _ = Describe("Validating VMIRS Admitter", func() {
 		}
 
 		resp := vmirsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 		Expect(resp.Result.Details.Causes).To(HaveLen(len(causes)))
 		for i, cause := range causes {
 			Expect(resp.Result.Details.Causes[i].Field).To(Equal(cause))
@@ -137,7 +137,7 @@ var _ = Describe("Validating VMIRS Admitter", func() {
 		}
 
 		resp := vmirsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 	})
 })
 

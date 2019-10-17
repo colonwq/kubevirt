@@ -29,9 +29,10 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/info"
-	"kubevirt.io/kubevirt/pkg/log"
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -84,9 +85,9 @@ var _ = Describe("Virt remote commands", func() {
 		It("should start a vmi", func() {
 			vmi := v1.NewVMIReferenceFromName("testvmi")
 			domain := api.NewMinimalDomain("testvmi")
-			domainManager.EXPECT().SyncVMI(vmi, useEmulation).Return(&domain.Spec, nil)
+			domainManager.EXPECT().SyncVMI(vmi, useEmulation, &cmdv1.VirtualMachineOptions{}).Return(&domain.Spec, nil)
 
-			err := client.SyncVirtualMachine(vmi)
+			err := client.SyncVirtualMachine(vmi, &cmdv1.VirtualMachineOptions{})
 			Expect(err).ToNot(HaveOccurred())
 		})
 
@@ -113,9 +114,20 @@ var _ = Describe("Virt remote commands", func() {
 			domain, exists, err := client.GetDomain()
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(exists).To(Equal(true))
+			Expect(exists).To(BeTrue())
 			Expect(domain).ToNot(Equal(nil))
 			Expect(domain.ObjectMeta.Name).To(Equal("testvmi1"))
+		})
+
+		It("should list no domain if no domain is there yet", func() {
+			var list []*api.Domain
+
+			domainManager.EXPECT().ListAllDomains().Return(list, nil)
+			domain, exists, err := client.GetDomain()
+			Expect(err).ToNot(HaveOccurred())
+
+			Expect(exists).To(BeFalse())
+			Expect(domain).ToNot(Equal(nil))
 		})
 
 		It("client should return disconnected after server stops", func() {
@@ -130,7 +142,7 @@ var _ = Describe("Virt remote commands", func() {
 
 			err = client.Ping()
 			Expect(err).To(HaveOccurred())
-			Expect(cmdclient.IsDisconnected(err)).To(Equal(true))
+			Expect(cmdclient.IsDisconnected(err)).To(BeTrue())
 
 			_, err = cmdclient.NewClient(shareDir + "/server.sock")
 			Expect(err).To(HaveOccurred())
@@ -148,7 +160,7 @@ var _ = Describe("Virt remote commands", func() {
 			domStats, exists, err := client.GetDomainStats()
 			Expect(err).ToNot(HaveOccurred())
 
-			Expect(exists).To(Equal(true))
+			Expect(exists).To(BeTrue())
 			Expect(domStats).ToNot(Equal(nil))
 			Expect(domStats.Name).To(Equal(list[0].Name))
 			Expect(domStats.UUID).To(Equal(list[0].UUID))

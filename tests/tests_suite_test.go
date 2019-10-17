@@ -20,18 +20,22 @@
 package tests_test
 
 import (
+	"fmt"
+	"os"
+	"strconv"
 	"testing"
 
 	. "github.com/onsi/ginkgo"
-	. "github.com/onsi/gomega"
+
+	"kubevirt.io/kubevirt/tests/reporter"
 
 	"kubevirt.io/kubevirt/tests"
 	ginkgo_reporters "kubevirt.io/qe-tools/pkg/ginkgo-reporters"
 )
 
 func TestTests(t *testing.T) {
-	RegisterFailHandler(tests.KubevirtFailHandler)
-	reporters := make([]Reporter, 0)
+	maxFails := getMaxFailsFromEnv()
+	reporters := []Reporter{reporter.NewKubernetesReporter(os.Getenv("ARTIFACTS"), maxFails)}
 	if ginkgo_reporters.Polarion.Run {
 		reporters = append(reporters, &ginkgo_reporters.Polarion)
 	}
@@ -48,3 +52,18 @@ var _ = BeforeSuite(func() {
 var _ = AfterSuite(func() {
 	tests.AfterTestSuitCleanup()
 })
+
+func getMaxFailsFromEnv() int {
+	maxFailsEnv := os.Getenv("REPORTER_MAX_FAILS")
+	if maxFailsEnv == "" {
+		return 10
+	}
+
+	maxFails, err := strconv.Atoi(maxFailsEnv)
+	if err != nil { // if the variable is set with a non int value
+		fmt.Println("Invalid REPORTER_MAX_FAILS variable, defaulting to 10")
+		return 10
+	}
+
+	return maxFails
+}

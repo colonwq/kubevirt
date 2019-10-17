@@ -30,7 +30,7 @@ import (
 	libvirt "github.com/libvirt/libvirt-go"
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 
-	"kubevirt.io/kubevirt/pkg/log"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/errors"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/statsconv"
@@ -190,7 +190,13 @@ func (l *LibvirtConnection) ListAllDomains(flags libvirt.ConnectListAllDomainsFl
 // command - the qemu command, for example this gets the interfaces: {"execute":"guest-network-get-interfaces"}
 // domainName -  the qemu domain name
 func (l *LibvirtConnection) QemuAgentCommand(command string, domainName string) (string, error) {
+	if err := l.reconnectIfNecessary(); err != nil {
+		return "", err
+	}
 	domain, err := l.Connect.LookupDomainByName(domainName)
+	if err != nil {
+		return "", err
+	}
 	result, err := domain.QemuAgentCommand(command, libvirt.DOMAIN_QEMU_AGENT_COMMAND_DEFAULT, uint32(0))
 	return result, err
 }

@@ -39,9 +39,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 
+	"kubevirt.io/client-go/kubecli"
 	uploadcdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/upload/v1alpha1"
 	cdiClientset "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned"
-	"kubevirt.io/kubevirt/pkg/kubecli"
 	"kubevirt.io/kubevirt/pkg/virtctl/templates"
 )
 
@@ -69,6 +69,7 @@ var (
 
 	uploadPodWaitSecs uint = 60
 	accessMode             = "ReadWriteOnce"
+	blockVolume            = false
 	noCreate               = false
 )
 
@@ -111,6 +112,7 @@ func NewImageUploadCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 	cmd.Flags().StringVar(&pvcSize, "pvc-size", "", "The size of the PVC to create (ex. 10Gi, 500Mi).")
 	cmd.Flags().StringVar(&storageClass, "storage-class", "", "The storage class for the PVC.")
 	cmd.Flags().StringVar(&accessMode, "access-mode", accessMode, "The access mode for the PVC.")
+	cmd.Flags().BoolVar(&blockVolume, "block-volume", blockVolume, "Create a PVC with VolumeMode=Block (default Filesystem).")
 	cmd.Flags().StringVar(&imagePath, "image-path", "", "Path to the local VM image.")
 	cmd.MarkFlagRequired("image-path")
 	cmd.Flags().BoolVar(&noCreate, "no-create", noCreate, "Don't attempt to create a new PVC.")
@@ -121,7 +123,7 @@ func NewImageUploadCommand(clientConfig clientcmd.ClientConfig) *cobra.Command {
 
 func usage() string {
 	usage := `  # Upload a local disk image to a newly created PersistentVolumeClaim:
-	virtctl image-upload --uploadproxy-url=https://cdi-uploadproxy.mycluster.com --pvc-name=upload-pvc --pvc-size=10Gi --image-path=/images/fedora28.qcow2`
+  {{ProgramName}} image-upload --uploadproxy-url=https://cdi-uploadproxy.mycluster.com --pvc-name=upload-pvc --pvc-size=10Gi --image-path=/images/fedora28.qcow2`
 	return usage
 }
 
@@ -151,8 +153,11 @@ func (c *command) run(cmd *cobra.Command, args []string) error {
 		if !(k8serrors.IsNotFound(err) && !noCreate) {
 			return err
 		}
+		if !noCreate && len(pvcSize) == 0 {
+			return fmt.Errorf("When creating PVC, the size must be specified")
+		}
 
-		pvc, err = createUploadPVC(virtClient, namespace, pvcName, pvcSize, storageClass, accessMode)
+		pvc, err = createUploadPVC(virtClient, namespace, pvcName, pvcSize, storageClass, accessMode, blockVolume)
 		if err != nil {
 			return err
 		}
@@ -343,10 +348,10 @@ func waitUploadPodRunning(client kubernetes.Interface, namespace, name string, i
 	return err
 }
 
-func createUploadPVC(client kubernetes.Interface, namespace, name, size, storageClass, accessMode string) (*v1.PersistentVolumeClaim, error) {
+func createUploadPVC(client kubernetes.Interface, namespace, name, size, storageClass, accessMode string, blockVolume bool) (*v1.PersistentVolumeClaim, error) {
 	quantity, err := resource.ParseQuantity(size)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Validation failed for size=%s: %s", size, err)
 	}
 
 	pvc := &v1.PersistentVolumeClaim{
@@ -372,6 +377,11 @@ func createUploadPVC(client kubernetes.Interface, namespace, name, size, storage
 
 	if accessMode != "" {
 		pvc.Spec.AccessModes = []v1.PersistentVolumeAccessMode{v1.PersistentVolumeAccessMode(accessMode)}
+	}
+
+	if blockVolume {
+		volMode := v1.PersistentVolumeBlock
+		pvc.Spec.VolumeMode = &volMode
 	}
 
 	pvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Create(pvc)

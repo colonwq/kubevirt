@@ -32,7 +32,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
-	"kubevirt.io/kubevirt/pkg/log"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
@@ -131,7 +131,11 @@ func (d *DirectoryListWatcher) startBackground() error {
 						log.Log.Reason(err).Error("Invalid content detected, ignoring and continuing.")
 						continue
 					}
-					d.eventChan <- watch.Event{Type: e, Object: api.NewMinimalDomainWithNS(namespace, name)}
+					domain := api.NewMinimalDomainWithNS(namespace, name)
+					if e == watch.Deleted {
+						log.Log.Object(domain).Warning("watchdog file removed for domain")
+					}
+					d.eventChan <- watch.Event{Type: e, Object: domain}
 				}
 			case err := <-d.watcher.Errors:
 				d.eventChan <- watch.Event{

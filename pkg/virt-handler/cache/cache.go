@@ -30,7 +30,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 
-	"kubevirt.io/kubevirt/pkg/log"
+	"kubevirt.io/client-go/log"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	notifyserver "kubevirt.io/kubevirt/pkg/virt-handler/notify-server"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
@@ -111,6 +111,7 @@ func (d *DomainWatcher) handleStaleWatchdogFiles() error {
 	}
 
 	for _, domain := range domains {
+		log.Log.Object(domain).Warning("detected expired watchdog for domain")
 		d.eventChan <- watch.Event{Type: watch.Deleted, Object: domain}
 	}
 	return nil

@@ -6,14 +6,12 @@ go_library(
     importpath = "kubevirt.io/kubevirt/cmd/virt-launcher",
     visibility = ["//visibility:private"],
     deps = [
-        "//pkg/api/v1:go_default_library",
         "//pkg/cloud-init:go_default_library",
         "//pkg/config:go_default_library",
         "//pkg/container-disk:go_default_library",
         "//pkg/ephemeral-disk:go_default_library",
         "//pkg/hooks:go_default_library",
         "//pkg/ignition:go_default_library",
-        "//pkg/log:go_default_library",
         "//pkg/virt-handler/cmd-client:go_default_library",
         "//pkg/virt-launcher:go_default_library",
         "//pkg/virt-launcher/notify-client:go_default_library",
@@ -23,6 +21,8 @@ go_library(
         "//pkg/virt-launcher/virtwrap/cmd-server:go_default_library",
         "//pkg/virt-launcher/virtwrap/util:go_default_library",
         "//pkg/watchdog:go_default_library",
+        "//staging/src/kubevirt.io/client-go/api/v1:go_default_library",
+        "//staging/src/kubevirt.io/client-go/log:go_default_library",
         "//vendor/github.com/libvirt/libvirt-go:go_default_library",
         "//vendor/github.com/spf13/pflag:go_default_library",
         "//vendor/k8s.io/apimachinery/pkg/types:go_default_library",
@@ -31,33 +31,13 @@ go_library(
     ],
 )
 
-load("//pkg/version:def.bzl", "version_x_defs")
+load("//vendor/kubevirt.io/client-go/version:def.bzl", "version_x_defs")
 
 go_binary(
     name = "virt-launcher",
     embed = [":go_default_library"],
     visibility = ["//visibility:public"],
     x_defs = version_x_defs(),
-)
-
-load("@bazel_tools//tools/build_defs/pkg:pkg.bzl", "pkg_tar")
-
-pkg_tar(
-    name = "sock-connector-tar",
-    srcs = [
-        "sock-connector",
-    ],
-    mode = "755",
-    package_dir = "/usr/share/kubevirt/virt-launcher",
-)
-
-pkg_tar(
-    name = "virt-launcher-tar",
-    srcs = [
-        ":virt-launcher",
-    ],
-    mode = "755",
-    package_dir = "/usr/bin",
 )
 
 load(
@@ -75,10 +55,8 @@ container_image(
 container_image(
     name = "virt-launcher-image",
     base = ":version-container",
+    directory = "/usr/bin",
     entrypoint = ["/usr/bin/virt-launcher"],
-    tars = [
-        ":sock-connector-tar",
-        ":virt-launcher-tar",
-    ],
+    files = [":virt-launcher"],
     visibility = ["//visibility:public"],
 )

@@ -32,8 +32,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/precond"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/precond"
 )
 
 // For versioning of the virt-handler and -launcher communication,
@@ -323,6 +323,8 @@ type HostDevice struct {
 	Type      string           `xml:"type,attr"`
 	BootOrder *BootOrder       `xml:"boot,omitempty"`
 	Managed   string           `xml:"managed,attr"`
+	Mode      string           `xml:"mode,attr,omitempty"`
+	Model     string           `xml:"model,attr,omitempty"`
 }
 
 type HostDeviceSource struct {
@@ -607,6 +609,7 @@ type SysInfo struct {
 	System    []Entry `xml:"system>entry"`
 	BIOS      []Entry `xml:"bios>entry"`
 	BaseBoard []Entry `xml:"baseBoard>entry"`
+	Chassis   []Entry `xml:"chassis>entry"`
 }
 
 type Entry struct {
@@ -699,6 +702,7 @@ type Address struct {
 	Controller string `xml:"controller,attr,omitempty"`
 	Target     string `xml:"target,attr,omitempty"`
 	Unit       string `xml:"unit,attr,omitempty"`
+	UUID       string `xml:"uuid,attr,omitempty"`
 }
 
 //END Video -------------------

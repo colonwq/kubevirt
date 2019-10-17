@@ -36,10 +36,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/cache"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/hooks"
-	"kubevirt.io/kubevirt/pkg/kubecli"
-	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
@@ -55,7 +55,7 @@ var _ = Describe("Template", func() {
 
 	ctrl := gomock.NewController(GinkgoT())
 	virtClient := kubecli.NewMockKubevirtClient(ctrl)
-	config, configMapInformer := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{})
+	config, configMapInformer, _ := testutils.NewFakeClusterConfig(&kubev1.ConfigMap{})
 
 	enableFeatureGate := func(featureGate string) {
 		testutils.UpdateFakeClusterConfig(configMapInformer, &kubev1.ConfigMap{
@@ -69,7 +69,9 @@ var _ = Describe("Template", func() {
 	BeforeEach(func() {
 		svc = NewTemplateService("kubevirt/virt-launcher",
 			"/var/run/kubevirt",
+			"/var/lib/kubevirt",
 			"/var/run/kubevirt-ephemeral-disks",
+			"/var/run/kubevirt/container-disks",
 			"pull-secret-1",
 			pvcCache,
 			virtClient,
@@ -120,6 +122,7 @@ var _ = Describe("Template", func() {
 				trueVar := true
 				annotations := map[string]string{
 					hooks.HookSidecarListAnnotationName: `[{"image": "some-image:v1", "imagePullPolicy": "IfNotPresent"}]`,
+					"test/test":                         "shouldwork",
 				}
 				pod, err := svc.RenderLaunchManifest(&v1.VirtualMachineInstance{ObjectMeta: metav1.ObjectMeta{Name: "testvmi", Namespace: "testns", UID: "1234", Annotations: annotations}, Spec: v1.VirtualMachineInstanceSpec{Domain: v1.DomainSpec{}}})
 				Expect(err).ToNot(HaveOccurred())
@@ -132,6 +135,7 @@ var _ = Describe("Template", func() {
 				}))
 				Expect(pod.ObjectMeta.Annotations).To(Equal(map[string]string{
 					v1.DomainAnnotation: "testvmi",
+					"test/test":         "shouldwork",
 				}))
 				Expect(pod.ObjectMeta.OwnerReferences).To(Equal([]metav1.OwnerReference{{
 					APIVersion:         v1.VirtualMachineInstanceGroupVersionKind.GroupVersion().String(),
@@ -152,6 +156,7 @@ var _ = Describe("Template", func() {
 					"--namespace", "testns",
 					"--kubevirt-share-dir", "/var/run/kubevirt",
 					"--ephemeral-disk-dir", "/var/run/kubevirt-ephemeral-disks",
+					"--container-disk-dir", "/var/run/kubevirt/container-disks",
 					"--readiness-file", "/var/run/kubevirt-infra/healthy",
 					"--grace-period-seconds", "45",
 					"--hook-sidecars", "1",
@@ -163,6 +168,34 @@ var _ = Describe("Template", func() {
 				By("setting the right hostname")
 				Expect(pod.Spec.Hostname).To(Equal("testvmi"))
 				Expect(pod.Spec.Subdomain).To(BeEmpty())
+			})
+		})
+		Context("with debug log annotation", func() {
+			It("should add the corresponding environment variable", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+						Labels: map[string]string{
+							debugLogs: "true",
+						},
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(pod.Spec.Containers)).To(Equal(1))
+				debugLogsValue := ""
+				for _, ev := range pod.Spec.Containers[0].Env {
+					if ev.Name == ENV_VAR_LIBVIRT_DEBUG_LOGS {
+						debugLogsValue = ev.Value
+					}
+				}
+				Expect(debugLogsValue).To(Equal("1"))
 			})
 		})
 		Context("with multus annotation", func() {
@@ -195,7 +228,7 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 				value, ok := pod.Annotations["k8s.v1.cni.cncf.io/networks"]
-				Expect(ok).To(Equal(true))
+				Expect(ok).To(BeTrue())
 				expectedIfaces := ("[" +
 					"{\"interface\":\"net1\",\"name\":\"default\",\"namespace\":\"default\"}," +
 					"{\"interface\":\"net2\",\"name\":\"test1\",\"namespace\":\"default\"}," +
@@ -228,10 +261,10 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 				value, ok := pod.Annotations["v1.multus-cni.io/default-network"]
-				Expect(ok).To(Equal(true))
+				Expect(ok).To(BeTrue())
 				Expect(value).To(Equal("default"))
 				value, ok = pod.Annotations["k8s.v1.cni.cncf.io/networks"]
-				Expect(ok).To(Equal(true))
+				Expect(ok).To(BeTrue())
 				Expect(value).To(Equal("[{\"interface\":\"net1\",\"name\":\"test1\",\"namespace\":\"default\"}]"))
 			})
 			It("should add MAC address in the pod annotation", func() {
@@ -271,7 +304,7 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 				value, ok := pod.Annotations["k8s.v1.cni.cncf.io/networks"]
-				Expect(ok).To(Equal(true))
+				Expect(ok).To(BeTrue())
 				expectedIfaces := ("[" +
 					"{\"interface\":\"net1\",\"name\":\"default\",\"namespace\":\"default\"}," +
 					"{\"interface\":\"net2\",\"mac\":\"de:ad:00:00:be:af\",\"name\":\"test1\",\"namespace\":\"default\"}" +
@@ -305,7 +338,7 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 				value, ok := pod.Annotations["cni"]
-				Expect(ok).To(Equal(true))
+				Expect(ok).To(BeTrue())
 				Expect(value).To(Equal("default,test1"))
 			})
 		})
@@ -332,7 +365,7 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(&vmi)
 				Expect(err).ToNot(HaveOccurred())
 				value, ok := pod.Annotations[ISTIO_KUBEVIRT_ANNOTATION]
-				Expect(ok).To(Equal(true))
+				Expect(ok).To(BeTrue())
 				Expect(value).To(Equal("k6t-eth0"))
 			})
 		})
@@ -369,6 +402,7 @@ var _ = Describe("Template", func() {
 					"--namespace", "default",
 					"--kubevirt-share-dir", "/var/run/kubevirt",
 					"--ephemeral-disk-dir", "/var/run/kubevirt-ephemeral-disks",
+					"--container-disk-dir", "/var/run/kubevirt/container-disks",
 					"--readiness-file", "/var/run/kubevirt-infra/healthy",
 					"--grace-period-seconds", "45",
 					"--hook-sidecars", "1",
@@ -379,7 +413,7 @@ var _ = Describe("Template", func() {
 				Expect(pod.Spec.Containers[1].VolumeMounts[0].MountPath).To(Equal(hooks.HookSocketsSharedDirectory))
 				Expect(pod.Spec.Volumes[0].EmptyDir.Medium).To(Equal(kubev1.StorageMedium("")))
 				Expect(pod.Spec.Volumes[2].HostPath.Path).To(Equal("/var/run/kubevirt"))
-				Expect(pod.Spec.Containers[0].VolumeMounts[1].MountPath).To(Equal("/var/run/kubevirt"))
+				Expect(pod.Spec.Containers[0].VolumeMounts[2].MountPath).To(Equal("/var/run/kubevirt"))
 				Expect(*pod.Spec.TerminationGracePeriodSeconds).To(Equal(int64(60)))
 			})
 
@@ -910,12 +944,12 @@ var _ = Describe("Template", func() {
 				Expect(hugepagesRequest.ToDec().ScaledValue(resource.Mega)).To(Equal(int64(64)))
 				Expect(hugepagesLimit.ToDec().ScaledValue(resource.Mega)).To(Equal(int64(64)))
 
-				Expect(len(pod.Spec.Volumes)).To(Equal(5))
+				Expect(len(pod.Spec.Volumes)).To(Equal(7))
 				Expect(pod.Spec.Volumes[0].EmptyDir).ToNot(BeNil())
 				Expect(pod.Spec.Volumes[0].EmptyDir.Medium).To(Equal(kubev1.StorageMediumHugePages))
 
-				Expect(len(pod.Spec.Containers[0].VolumeMounts)).To(Equal(5))
-				Expect(pod.Spec.Containers[0].VolumeMounts[3].MountPath).To(Equal("/dev/hugepages"))
+				Expect(len(pod.Spec.Containers[0].VolumeMounts)).To(Equal(6))
+				Expect(pod.Spec.Containers[0].VolumeMounts[4].MountPath).To(Equal("/dev/hugepages"))
 			},
 				table.Entry("hugepages-2Mi", "2Mi"),
 				table.Entry("hugepages-1Gi", "1Gi"),
@@ -955,11 +989,11 @@ var _ = Describe("Template", func() {
 				Expect(pod.Spec.Containers[0].VolumeDevices).To(BeEmpty(), "No devices in manifest for 1st container")
 
 				Expect(pod.Spec.Containers[0].VolumeMounts).ToNot(BeEmpty(), "Some mounts in manifest for 1st container")
-				Expect(len(pod.Spec.Containers[0].VolumeMounts)).To(Equal(5), "4 mounts in manifest for 1st container")
-				Expect(pod.Spec.Containers[0].VolumeMounts[3].Name).To(Equal(volumeName), "1st mount in manifest for 1st container has correct name")
+				Expect(len(pod.Spec.Containers[0].VolumeMounts)).To(Equal(6), "4 mounts in manifest for 1st container")
+				Expect(pod.Spec.Containers[0].VolumeMounts[4].Name).To(Equal(volumeName), "1st mount in manifest for 1st container has correct name")
 
 				Expect(pod.Spec.Volumes).ToNot(BeEmpty(), "Found some volumes in manifest")
-				Expect(len(pod.Spec.Volumes)).To(Equal(5), "Found 4 volumes in manifest")
+				Expect(len(pod.Spec.Volumes)).To(Equal(7), "Found 4 volumes in manifest")
 				Expect(pod.Spec.Volumes[0].PersistentVolumeClaim).ToNot(BeNil(), "Found PVC volume")
 				Expect(pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(pvcName), "Found PVC volume with correct name")
 			})
@@ -1003,10 +1037,10 @@ var _ = Describe("Template", func() {
 				Expect(pod.Spec.Containers[0].VolumeDevices[0].Name).To(Equal(volumeName), "Found device for 1st container with correct name")
 
 				Expect(pod.Spec.Containers[0].VolumeMounts).ToNot(BeEmpty(), "Found some mounts in manifest for 1st container")
-				Expect(len(pod.Spec.Containers[0].VolumeMounts)).To(Equal(4), "Found 3 mounts in manifest for 1st container")
+				Expect(len(pod.Spec.Containers[0].VolumeMounts)).To(Equal(5), "Found 5 mounts in manifest for 1st container")
 
 				Expect(pod.Spec.Volumes).ToNot(BeEmpty(), "Found some volumes in manifest")
-				Expect(len(pod.Spec.Volumes)).To(Equal(5), "Found 4 volumes in manifest")
+				Expect(len(pod.Spec.Volumes)).To(Equal(7), "Found 4 volumes in manifest")
 				Expect(pod.Spec.Volumes[0].PersistentVolumeClaim).ToNot(BeNil(), "Found PVC volume")
 				Expect(pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName).To(Equal(pvcName), "Found PVC volume with correct name")
 			})
@@ -1107,10 +1141,18 @@ var _ = Describe("Template", func() {
 				Expect(pod.Spec.ImagePullSecrets[0].Name).To(Equal("pull-secret-2"))
 				Expect(pod.Spec.ImagePullSecrets[1].Name).To(Equal("pull-secret-1"))
 			})
+
+			It("should have compute as first container in the pod", func() {
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(pod.Spec.Containers[0].Image).To(Equal("kubevirt/virt-launcher"))
+				Expect(pod.Spec.Containers[0].Name).To(Equal("compute"))
+				Expect(pod.Spec.Containers[1].Name).To(Equal("volumecontainerdisk1"))
+			})
 		})
 
 		Context("with sriov interface", func() {
-			It("should run privileged", func() {
+			It("should not run privileged", func() {
 				sriovInterface := v1.InterfaceSRIOV{}
 				domain := v1.DomainSpec{}
 				domain.Devices.Interfaces = []v1.Interface{{Name: "testnet", InterfaceBindingMethod: v1.InterfaceBindingMethod{SRIOV: &sriovInterface}}}
@@ -1125,7 +1167,7 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
-				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(Equal(true))
+				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(BeFalse())
 			})
 			It("should mount pci related host directories", func() {
 				sriovInterface := v1.InterfaceSRIOV{}
@@ -1143,12 +1185,8 @@ var _ = Describe("Template", func() {
 
 				Expect(len(pod.Spec.Containers)).To(Equal(1))
 				// Skip first three mounts that are generic for all launcher pods
-				Expect(pod.Spec.Containers[0].VolumeMounts[3].MountPath).To(Equal("/sys/bus/pci/"))
 				Expect(pod.Spec.Containers[0].VolumeMounts[4].MountPath).To(Equal("/sys/devices/"))
-				Expect(pod.Spec.Containers[0].VolumeMounts[5].MountPath).To(Equal("/dev/vfio/"))
-				Expect(pod.Spec.Volumes[0].HostPath.Path).To(Equal("/sys/bus/pci/"))
-				Expect(pod.Spec.Volumes[1].HostPath.Path).To(Equal("/sys/devices/"))
-				Expect(pod.Spec.Volumes[2].HostPath.Path).To(Equal("/dev/vfio/"))
+				Expect(pod.Spec.Volumes[0].HostPath.Path).To(Equal("/sys/devices/"))
 			})
 		})
 		Context("with slirp interface", func() {
@@ -1339,7 +1377,7 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(pod.Spec.Volumes).ToNot(BeEmpty())
-				Expect(len(pod.Spec.Volumes)).To(Equal(5))
+				Expect(len(pod.Spec.Volumes)).To(Equal(7))
 				Expect(pod.Spec.Volumes[0].ConfigMap).ToNot(BeNil())
 				Expect(pod.Spec.Volumes[0].ConfigMap.LocalObjectReference.Name).To(Equal("test-configmap"))
 			})
@@ -1368,7 +1406,7 @@ var _ = Describe("Template", func() {
 				Expect(err).ToNot(HaveOccurred())
 
 				Expect(pod.Spec.Volumes).ToNot(BeEmpty())
-				Expect(len(pod.Spec.Volumes)).To(Equal(5))
+				Expect(len(pod.Spec.Volumes)).To(Equal(7))
 				Expect(pod.Spec.Volumes[0].Secret).ToNot(BeNil())
 				Expect(pod.Spec.Volumes[0].Secret.SecretName).To(Equal("test-secret"))
 			})
@@ -1445,6 +1483,68 @@ var _ = Describe("Template", func() {
 				pod, err := svc.RenderLaunchManifest(vmi)
 				Expect(err).ToNot(HaveOccurred())
 				Expect(pod.Spec.Containers[0].ReadinessProbe).To(Not(BeNil()))
+			})
+		})
+
+		Context("with GPU device interface", func() {
+			It("should not run privileged", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								GPUs: []v1.GPU{
+									v1.GPU{
+										Name:       "gpu1",
+										DeviceName: "vendor.com/gpu_name",
+									},
+								},
+							},
+						},
+					},
+				}
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+
+				Expect(len(pod.Spec.Containers)).To(Equal(1))
+				Expect(*pod.Spec.Containers[0].SecurityContext.Privileged).To(BeFalse())
+			})
+			It("should mount pci related host directories", func() {
+				vmi := v1.VirtualMachineInstance{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "testvmi",
+						Namespace: "default",
+						UID:       "1234",
+					},
+					Spec: v1.VirtualMachineInstanceSpec{
+						Domain: v1.DomainSpec{
+							Devices: v1.Devices{
+								GPUs: []v1.GPU{
+									v1.GPU{
+										Name:       "gpu1",
+										DeviceName: "vendor.com/gpu_name",
+									},
+								},
+							},
+						},
+					},
+				}
+
+				pod, err := svc.RenderLaunchManifest(&vmi)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(len(pod.Spec.Containers)).To(Equal(1))
+				// Skip first three mounts that are generic for all launcher pods
+				Expect(pod.Spec.Containers[0].VolumeMounts[4].MountPath).To(Equal("/sys/devices/"))
+				Expect(pod.Spec.Volumes[0].HostPath.Path).To(Equal("/sys/devices/"))
+
+				resources := pod.Spec.Containers[0].Resources
+				val, ok := resources.Requests["vendor.com/gpu_name"]
+				Expect(ok).To(Equal(true))
+				Expect(val).To(Equal(*resource.NewQuantity(1, resource.DecimalSI)))
 			})
 		})
 

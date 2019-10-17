@@ -24,12 +24,14 @@ trap 'echo "Graceful exit"; exit 0' SIGINT SIGQUIT SIGTERM
 
 ALPINE_IMAGE_PATH=/usr/share/nginx/html/images/alpine.iso
 CIRROS_IMAGE_PATH=/usr/share/nginx/html/images/cirros.img
+FEDORA_IMAGE_PATH=/usr/share/nginx/html/images/fedora.img
 IMAGE_PATH=/images
 IMAGE_NAME=${IMAGE_NAME:-cirros}
 
 case "$IMAGE_NAME" in
 cirros) CONVERT_PATH=$CIRROS_IMAGE_PATH ;;
 alpine) CONVERT_PATH=$ALPINE_IMAGE_PATH ;;
+fedora-cloud) CONVERT_PATH=$FEDORA_IMAGE_PATH ;;
 *)
     echo "failed to find image $IMAGE_NAME"
     ;;
@@ -58,5 +60,6 @@ else
     # Expose qemu-guest-agent via nginx server
     cp /usr/bin/qemu-ga /usr/share/nginx/html/
     cp /usr/bin/stress /usr/share/nginx/html/
+    cp /usr/bin/dmidecode /usr/share/nginx/html/
     /usr/sbin/nginx
 fi

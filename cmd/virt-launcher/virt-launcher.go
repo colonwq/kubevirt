@@ -22,7 +22,6 @@ package main
 import (
 	goflag "flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -37,14 +36,14 @@ import (
 	utilwait "k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/watch"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	ephemeraldisk "kubevirt.io/kubevirt/pkg/ephemeral-disk"
 	"kubevirt.io/kubevirt/pkg/hooks"
 	"kubevirt.io/kubevirt/pkg/ignition"
-	"kubevirt.io/kubevirt/pkg/log"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	virtlauncher "kubevirt.io/kubevirt/pkg/virt-launcher"
 	notifyclient "kubevirt.io/kubevirt/pkg/virt-launcher/notify-client"
@@ -77,19 +76,6 @@ func startCmdServer(socketPath string,
 	domainManager virtwrap.DomainManager,
 	stopChan chan struct{},
 	options *cmdserver.ServerOptions) chan struct{} {
-
-	err := os.RemoveAll(socketPath)
-	if err != nil {
-		log.Log.Reason(err).Error("Could not clean up virt-launcher cmd socket")
-		panic(err)
-	}
-
-	err = os.MkdirAll(filepath.Dir(socketPath), 0755)
-	if err != nil {
-		log.Log.Reason(err).Error("Could not create directory for socket.")
-		panic(err)
-	}
-
 	done, err := cmdserver.RunServer(socketPath, domainManager, stopChan, options)
 	if err != nil {
 		log.Log.Reason(err).Error("Failed to start virt-launcher cmd server")
@@ -177,6 +163,7 @@ func startWatchdogTicker(watchdogFile string, watchdogInterval time.Duration, st
 
 func initializeDirs(virtShareDir string,
 	ephemeralDiskDir string,
+	containerDiskDir string,
 	uid string) {
 
 	err := virtlauncher.InitializeSharedDirectories(virtShareDir)
@@ -199,7 +186,7 @@ func initializeDirs(virtShareDir string,
 		panic(err)
 	}
 
-	err = containerdisk.SetLocalDirectory(ephemeralDiskDir + "/container-disk-data")
+	err = containerdisk.SetLocalDirectory(containerDiskDir)
 	if err != nil {
 		panic(err)
 	}
@@ -305,41 +292,11 @@ func waitForFinalNotify(deleteNotificationSent chan watch.Event,
 	}
 }
 
-// writeProtectPrivateDir waits until the kubevirt private vnc socket exists and than mark its folder as read only
-// this is a workaround preventing QEMU from deleting its sockets prematurely as described in a bug https://bugs.launchpad.net/qemu/+bug/1795100
-// once the QEMU 4.0 is released the need for this workaround goes away
-// Fixes https://bugzilla.redhat.com/show_bug.cgi?id=1683964
-func writeProtectPrivateDir(uid string) {
-	vncAppeared := false
-	// waits maximum of 20s for vnc file to appear
-	for i := 0; i < 20; i++ {
-		if _, err := os.Stat(filepath.Join("/var/run/kubevirt-private", uid, "virt-vnc")); os.IsNotExist(err) {
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		vncAppeared = true
-		break
-	}
-	if vncAppeared {
-		os.Chmod(filepath.Join("/var/run/kubevirt-private", uid), 0444)
-	}
-}
-
-func cleanupEphemeralDiskDirectory(ephemeralDiskDir string) {
+func cleanupContainerDiskDirectory(ephemeralDiskDir string) {
 	// Cleanup the content of ephemeralDiskDir, to make sure that all containerDisk containers terminate
-	if _, err := os.Stat(ephemeralDiskDir); !os.IsNotExist(err) {
-		dir, err := ioutil.ReadDir(ephemeralDiskDir)
-		if err != nil {
-			log.Log.Reason(err).Errorf("failed to read content of the ephemeral disk directory: %s", ephemeralDiskDir)
-			return
-		}
-		for _, d := range dir {
-			removePath := filepath.Join(ephemeralDiskDir, d.Name())
-			err := os.RemoveAll(removePath)
-			if err != nil {
-				log.Log.Reason(err).Errorf("could not clean up ephemeral disk directory: %s", removePath)
-			}
-		}
+	err := RemoveContents(ephemeralDiskDir)
+	if err != nil {
+		log.Log.Reason(err).Errorf("could not clean up ephemeral disk directory: %s", ephemeralDiskDir)
 	}
 }
 
@@ -347,6 +304,7 @@ func main() {
 	qemuTimeout := pflag.Duration("qemu-timeout", defaultStartTimeout, "Amount of time to wait for qemu")
 	virtShareDir := pflag.String("kubevirt-share-dir", "/var/run/kubevirt", "Shared directory between virt-handler and virt-launcher")
 	ephemeralDiskDir := pflag.String("ephemeral-disk-dir", "/var/run/kubevirt-ephemeral-disks", "Base directory for ephemeral disk data")
+	containerDiskDir := pflag.String("container-disk-dir", "/var/run/kubevirt/container-disks", "Base directory for container disk data")
 	name := pflag.String("name", "", "Name of the VirtualMachineInstance")
 	uid := pflag.String("uid", "", "UID of the VirtualMachineInstance")
 	namespace := pflag.String("namespace", "", "Namespace of the VirtualMachineInstance")
@@ -367,7 +325,7 @@ func main() {
 	log.InitializeLogging("virt-launcher")
 
 	if !*noFork {
-		exitCode, err := ForkAndMonitor("qemu-system", *ephemeralDiskDir)
+		exitCode, err := ForkAndMonitor("qemu-system", *ephemeralDiskDir, *containerDiskDir)
 		if err != nil {
 			log.Log.Reason(err).Error("monitoring virt-launcher failed")
 			os.Exit(1)
@@ -385,7 +343,7 @@ func main() {
 	vm := v1.NewVMIReferenceFromNameWithNS(*namespace, *name)
 
 	// Initialize local and shared directories
-	initializeDirs(*virtShareDir, *ephemeralDiskDir, *uid)
+	initializeDirs(*virtShareDir, *ephemeralDiskDir, *containerDiskDir, *uid)
 
 	// Start libvirtd, virtlogd, and establish libvirt connection
 	stopChan := make(chan struct{})
@@ -474,12 +432,6 @@ func main() {
 			*gracePeriodSeconds,
 			shutdownCallback)
 
-		// waits until virt-vnc socket is ready and than mark its parent folder as read only
-		// workaround preventing QEMU from deleting socket prematurely
-		// the code need to be executed after the QEMU reports VM is running, so the wait
-		// for socket creation is the shortest possible
-		go writeProtectPrivateDir(*uid)
-
 		// This is a wait loop that monitors the qemu pid. When the pid
 		// exits, the wait loop breaks.
 		mon.RunForever(*qemuTimeout, signalStopChan)
@@ -499,8 +451,8 @@ func main() {
 
 // ForkAndMonitor itself to give qemu an extra grace period to properly terminate
 // in case of virt-launcher crashes
-func ForkAndMonitor(qemuProcessCommandPrefix string, ephemeralDiskDir string) (int, error) {
-	defer cleanupEphemeralDiskDirectory(ephemeralDiskDir)
+func ForkAndMonitor(qemuProcessCommandPrefix string, ephemeralDiskDir string, containerDiskDir string) (int, error) {
+	defer cleanupContainerDiskDirectory(containerDiskDir)
 	cmd := exec.Command(os.Args[0], append(os.Args[1:], "--no-fork", "true")...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -581,4 +533,18 @@ func ForkAndMonitor(qemuProcessCommandPrefix string, ephemeralDiskDir string) (i
 		})
 	}
 	return exitCode, nil
+}
+
+func RemoveContents(dir string) error {
+	files, err := filepath.Glob(filepath.Join(dir, "*.sock"))
+	if err != nil {
+		return err
+	}
+	for _, file := range files {
+		err = os.RemoveAll(file)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -28,6 +28,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+
 	"k8s.io/api/admission/v1beta1"
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -35,29 +36,25 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	k8sfield "k8s.io/apimachinery/pkg/util/validation/field"
 
+	v1 "kubevirt.io/client-go/api/v1"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
 var _ = Describe("Validating VM Admitter", func() {
-	config, configMapInformer := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
-	vmsAdmitter := &VMsAdmitter{ClusterConfig: config}
+	config, _, crdInformer := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
+	var vmsAdmitter *VMsAdmitter
 
 	notRunning := false
-	enableFeatureGate := func(featureGate string) {
-		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{
-			Data: map[string]string{virtconfig.FeatureGatesKey: featureGate},
-		})
-	}
-	disableFeatureGates := func() {
-		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{})
-	}
 
-	AfterEach(func() {
-		disableFeatureGates()
+	BeforeEach(func() {
+		vmsAdmitter = &VMsAdmitter{
+			ClusterConfig: config,
+			cloneAuthFunc: func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error) {
+				return true, "", nil
+			},
+		}
 	})
 
 	It("reject invalid VirtualMachineInstance spec", func() {
@@ -85,7 +82,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		}
 
 		resp := vmsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 		Expect(len(resp.Result.Details.Causes)).To(Equal(1))
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.template.spec.domain.devices.disks[0].name"))
 	})
@@ -121,7 +118,7 @@ var _ = Describe("Validating VM Admitter", func() {
 		}
 
 		resp := vmsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 	})
 
 	It("should accept valid DataVolumeTemplate", func() {
@@ -164,9 +161,9 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		}
 
-		enableFeatureGate("DataVolumes")
+		testutils.AddDataVolumeAPI(crdInformer)
 		resp := vmsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 	})
 
 	It("should reject invalid DataVolumeTemplate with no Volume reference in VMI template", func() {
@@ -209,9 +206,9 @@ var _ = Describe("Validating VM Admitter", func() {
 			},
 		}
 
-		enableFeatureGate("DataVolumes")
+		testutils.AddDataVolumeAPI(crdInformer)
 		resp := vmsAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 		Expect(len(resp.Result.Details.Causes)).To(Equal(1))
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.dataVolumeTemplate[0]"))
 	})
@@ -225,7 +222,7 @@ var _ = Describe("Validating VM Admitter", func() {
 					VolumeSource: volumeSource,
 				})
 
-				enableFeatureGate("DataVolumes")
+				testutils.AddDataVolumeAPI(crdInformer)
 				causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
 				Expect(len(causes)).To(Equal(0))
 			},
@@ -248,7 +245,7 @@ var _ = Describe("Validating VM Admitter", func() {
 				VolumeSource: v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: "fake"}},
 			})
 
-			disableFeatureGates()
+			testutils.RemoveDataVolumeAPI(crdInformer)
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake[0]"))
@@ -261,7 +258,7 @@ var _ = Describe("Validating VM Admitter", func() {
 				VolumeSource: v1.VolumeSource{DataVolume: &v1.DataVolumeSource{Name: ""}},
 			})
 
-			enableFeatureGate("DataVolumes")
+			testutils.AddDataVolumeAPI(crdInformer)
 			causes := validateVolumes(k8sfield.NewPath("fake"), vmi.Spec.Volumes, config)
 			Expect(len(causes)).To(Equal(1))
 			Expect(string(causes[0].Type)).To(Equal("FieldValueRequired"))
@@ -593,6 +590,118 @@ var _ = Describe("Validating VM Admitter", func() {
 			Expect(len(causes)).To(Equal(1))
 			Expect(causes[0].Field).To(Equal("fake"))
 		})
-	})
 
+		table.DescribeTable("should successfully authorize clone", func(arNamespace, vmNamespace, sourceNamespace,
+			serviceAccount, expectedSourceNamespace, expectedTargetNamespace, expectedServiceAccount string) {
+
+			vm := &v1.VirtualMachine{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: vmNamespace,
+				},
+				Spec: v1.VirtualMachineSpec{
+					Template: &v1.VirtualMachineInstanceTemplateSpec{},
+					DataVolumeTemplates: []cdiv1.DataVolume{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "whatever",
+							},
+							Spec: cdiv1.DataVolumeSpec{
+								Source: cdiv1.DataVolumeSource{
+									PVC: &cdiv1.DataVolumeSourcePVC{
+										Name:      "whocares",
+										Namespace: sourceNamespace,
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			if serviceAccount != "" {
+				vm.Spec.Template.Spec.Volumes = []v1.Volume{
+					{
+						VolumeSource: v1.VolumeSource{
+							ServiceAccount: &v1.ServiceAccountVolumeSource{
+								ServiceAccountName: serviceAccount,
+							},
+						},
+					},
+				}
+			}
+
+			ar := &v1beta1.AdmissionRequest{
+				Namespace: arNamespace,
+			}
+
+			vmsAdmitter.cloneAuthFunc = makeCloneAdmitFunc(expectedSourceNamespace, "whocares",
+				expectedTargetNamespace, expectedServiceAccount)
+			causes, err := vmsAdmitter.authorizeVirtualMachineSpec(ar, vm)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(causes).To(BeEmpty())
+		},
+			table.Entry("when source namespace suppied", "ns1", "", "ns3", "", "ns3", "ns1", "default"),
+			table.Entry("when vm namespace suppied and source not", "ns1", "ns2", "", "", "ns2", "ns2", "default"),
+			table.Entry("when source namespace suppied", "ns1", "", "ns3", "", "ns3", "ns1", "default"),
+			table.Entry("when ar namespace suppied and vm/source not", "ns1", "", "", "", "ns1", "ns1", "default"),
+			table.Entry("when everything suppied", "ns1", "ns2", "ns3", "", "ns3", "ns2", "default"),
+			table.Entry("when everything suppied", "ns1", "ns2", "ns3", "sa", "ns3", "ns2", "sa"),
+		)
+
+		table.DescribeTable("should deny clone", func(sourceNamespace, sourceName, failMessage string, failErr error, expectedMessage string) {
+			vm := &v1.VirtualMachine{
+				Spec: v1.VirtualMachineSpec{
+					Template: &v1.VirtualMachineInstanceTemplateSpec{},
+					DataVolumeTemplates: []cdiv1.DataVolume{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "whatever",
+							},
+							Spec: cdiv1.DataVolumeSpec{
+								Source: cdiv1.DataVolumeSource{
+									PVC: &cdiv1.DataVolumeSourcePVC{
+										Name:      sourceName,
+										Namespace: sourceNamespace,
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			ar := &v1beta1.AdmissionRequest{}
+
+			vmsAdmitter.cloneAuthFunc = makeCloneAdmitFailFunc(failMessage, failErr)
+			causes, err := vmsAdmitter.authorizeVirtualMachineSpec(ar, vm)
+			if failErr != nil {
+				Expect(err).To(Equal(failErr))
+			} else {
+				Expect(err).ToNot(HaveOccurred())
+				Expect(causes).To(HaveLen(1))
+				Expect(causes[0].Message).To(Equal(expectedMessage))
+			}
+		},
+			table.Entry("when source name not supplied", "", "sourceName", "Clone source /sourceName invalid", nil, "Clone source /sourceName invalid"),
+			table.Entry("when source namespace not supplied", "sourceNamespace", "", "Clone source sourceNamespace/ invalid", nil, "Clone source sourceNamespace/ invalid"),
+			table.Entry("when user not authorized", "sourceNamespace", "sourceName", "no permission", nil, "Authorization failed, message is: no permission"),
+			table.Entry("error occurs", "sourceNamespace", "sourceName", "", fmt.Errorf("bad error"), ""),
+		)
+	})
 })
+
+func makeCloneAdmitFunc(expectedSourceNamespace, expectedPVCName, expectedTargetNamespace, expectedServiceAccount string) CloneAuthFunc {
+	return func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error) {
+		Expect(pvcNamespace).Should(Equal(expectedSourceNamespace))
+		Expect(pvcName).Should(Equal(expectedPVCName))
+		Expect(saNamespace).Should(Equal(expectedTargetNamespace))
+		Expect(saName).Should(Equal(expectedServiceAccount))
+		return true, "", nil
+	}
+}
+
+func makeCloneAdmitFailFunc(message string, err error) CloneAuthFunc {
+	return func(pvcNamespace, pvcName, saNamespace, saName string) (bool, string, error) {
+		return false, message, err
+	}
+}

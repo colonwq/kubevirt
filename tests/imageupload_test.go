@@ -1,7 +1,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,7 +13,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
 )
 
@@ -27,7 +26,7 @@ const (
 
 var _ = Describe("ImageUpload", func() {
 
-	flag.Parse()
+	tests.FlagParse()
 
 	namespace := tests.NamespaceTestDefault
 	pvcName := "alpine-pvc"

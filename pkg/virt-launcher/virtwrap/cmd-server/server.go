@@ -22,15 +22,16 @@ package cmdserver
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 
 	"k8s.io/apimachinery/pkg/util/json"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
-	"kubevirt.io/kubevirt/pkg/log"
 	grpcutil "kubevirt.io/kubevirt/pkg/util/net/grpc"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap"
@@ -156,7 +157,7 @@ func (l *Launcher) SyncVirtualMachine(ctx context.Context, request *cmdv1.VMIReq
 		return response, nil
 	}
 
-	if _, err := l.domainManager.SyncVMI(vmi, l.useEmulation); err != nil {
+	if _, err := l.domainManager.SyncVMI(vmi, l.useEmulation, request.Options); err != nil {
 		log.Log.Object(vmi).Reason(err).Errorf("Failed to sync vmi")
 		response.Success = false
 		response.Message = getErrorMessage(err)
@@ -236,7 +237,7 @@ func (l *Launcher) GetDomain(ctx context.Context, request *cmdv1.EmptyRequest) (
 		return response, nil
 	}
 
-	if len(list) >= 0 {
+	if len(list) > 0 {
 		if domain, err := json.Marshal(list[0]); err != nil {
 			log.Log.Reason(err).Errorf("Failed to marshal domain")
 			response.Response.Success = false
@@ -265,7 +266,7 @@ func (l *Launcher) GetDomainStats(ctx context.Context, request *cmdv1.EmptyReque
 		return response, nil
 	}
 
-	if len(list) >= 0 {
+	if len(list) > 0 {
 		if domainStats, err := json.Marshal(list[0]); err != nil {
 			log.Log.Reason(err).Errorf("Failed to marshal domain stats")
 			response.Response.Success = false
@@ -311,7 +312,18 @@ func RunServer(socketPath string,
 		select {
 		case <-stopChan:
 			log.Log.Info("stopping cmd server")
-			grpcServer.Stop()
+			stopped := make(chan struct{})
+			go func() {
+				grpcServer.Stop()
+				close(stopped)
+			}()
+
+			select {
+			case <-stopped:
+				log.Log.Info("cmd server stopped")
+			case <-time.After(1 * time.Second):
+				log.Log.Error("timeout on stopping the cmd server, continuing anyway.")
+			}
 			sock.Close()
 			os.Remove(socketPath)
 			close(done)

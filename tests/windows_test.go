@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -34,10 +33,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/rand"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 	"kubevirt.io/kubevirt/tests"
@@ -56,7 +54,7 @@ const (
 )
 
 var _ = Describe("Windows VirtualMachineInstance", func() {
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -130,7 +128,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 		windowsVMI.Spec.Domain.Devices.Interfaces[0].Model = "e1000"
 	})
 
-	It("should succeed to start a vmi", func() {
+	It("[test_id:223]should succeed to start a vmi", func() {
 		vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(windowsVMI)
 		Expect(err).To(BeNil())
 		tests.WaitForSuccessfulVMIStartWithTimeout(vmi, 360)
@@ -147,7 +145,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 		Expect(err).To(BeNil())
 	}, 300)
 
-	Context("with winrm connection", func() {
+	Context("[ref_id:295]with winrm connection", func() {
 		var winrmcliPod *k8sv1.Pod
 		var cli []string
 		var output string
@@ -156,12 +154,12 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 		BeforeEach(func() {
 			By("Creating winrm-cli pod for the future use")
 			winrmcliPod = &k8sv1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: winrmCli + rand.String(5)},
+				ObjectMeta: metav1.ObjectMeta{GenerateName: winrmCli},
 				Spec: k8sv1.PodSpec{
 					Containers: []k8sv1.Container{
 						{
 							Name:    winrmCli,
-							Image:   fmt.Sprintf("%s/%s:%s", tests.KubeVirtRepoPrefix, winrmCli, tests.KubeVirtVersionTag),
+							Image:   fmt.Sprintf("%s/%s:%s", tests.KubeVirtUtilityRepoPrefix, winrmCli, tests.KubeVirtUtilityVersionTag),
 							Command: []string{"sleep"},
 							Args:    []string{"3600"},
 						},
@@ -189,7 +187,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 			}
 		})
 
-		It("should have correct UUID", func() {
+		It("[test_id:240]should have correct UUID", func() {
 			command := append(cli, "wmic csproduct get \"UUID\"")
 			By(fmt.Sprintf("Running \"%s\" command via winrm-cli", command))
 			Eventually(func() error {
@@ -205,7 +203,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 			Expect(output).Should(ContainSubstring(strings.ToUpper(windowsFirmware)))
 		}, 360)
 
-		It("should have pod IP", func() {
+		It("should have default masquerade IP", func() {
 			command := append(cli, "ipconfig /all")
 			By(fmt.Sprintf("Running \"%s\" command via winrm-cli", command))
 			Eventually(func() error {
@@ -219,7 +217,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 			}, time.Minute*5, time.Second*15).ShouldNot(HaveOccurred())
 
 			By("Checking that the Windows VirtualMachineInstance has expected IP address")
-			Expect(output).Should(ContainSubstring(vmiIp))
+			Expect(output).Should(ContainSubstring("10.0.2.2"))
 		}, 360)
 		It("should have the domain set properly", func() {
 			command := append(cli, "wmic nicconfig get dnsdomain")
@@ -264,7 +262,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 		}, 360)
 	})
 
-	Context("with kubectl command", func() {
+	Context("[ref_id:222]with kubectl command", func() {
 		var workDir string
 		var yamlFile string
 		BeforeEach(func() {
@@ -292,7 +290,7 @@ var _ = Describe("Windows VirtualMachineInstance", func() {
 			tests.WaitForSuccessfulVMIStartWithTimeout(windowsVMI, 360)
 		})
 
-		It("should succeed to stop a vmi", func() {
+		It("[test_id:239]should succeed to stop a vmi", func() {
 			By("Starting the vmi via kubectl command")
 			_, _, err = tests.RunCommand("kubectl", "create", "-f", yamlFile)
 			Expect(err).ToNot(HaveOccurred())

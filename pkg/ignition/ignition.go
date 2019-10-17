@@ -25,10 +25,10 @@ import (
 	"io/ioutil"
 	"os"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
+	"kubevirt.io/client-go/precond"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
-	"kubevirt.io/kubevirt/pkg/log"
-	"kubevirt.io/kubevirt/pkg/precond"
 )
 
 var ignitionLocalDir = "/var/run/libvirt/ignition-dir"
@@ -72,13 +72,13 @@ func GenerateIgnitionLocalData(vmi *v1.VirtualMachineInstance, namespace string)
 		return err
 	}
 
-	ignitionFile := fmt.Sprintf("%s/%s", domainBasePath, "data.ign")
+	ignitionFile := fmt.Sprintf("%s/%s", domainBasePath, IgnitionFile)
 	ignitionData := []byte(vmi.Annotations[v1.IgnitionAnnotation])
 	err = ioutil.WriteFile(ignitionFile, ignitionData, 0644)
 	if err != nil {
 		return err
 	}
 
-	log.Log.V(2).Infof("generated Ignition file %s/data.ign", domainBasePath)
+	log.Log.V(2).Infof("generated Ignition file %s", ignitionFile)
 	return nil
 }

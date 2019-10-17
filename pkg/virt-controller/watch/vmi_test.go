@@ -41,10 +41,10 @@ import (
 
 	fakenetworkclient "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/client/clientset/versioned/fake"
 
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
-	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 )
@@ -142,11 +142,13 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 	syncCaches := func(stop chan struct{}) {
 		go vmiInformer.Run(stop)
 		go podInformer.Run(stop)
+		go pvcInformer.Run(stop)
 
 		go dataVolumeInformer.Run(stop)
 		Expect(cache.WaitForCacheSync(stop,
 			vmiInformer.HasSynced,
 			podInformer.HasSynced,
+			pvcInformer.HasSynced,
 			dataVolumeInformer.HasSynced)).To(BeTrue())
 	}
 
@@ -161,10 +163,10 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 		dataVolumeInformer, dataVolumeSource = testutils.NewFakeInformerFor(&cdiv1.DataVolume{})
 		recorder = record.NewFakeRecorder(100)
 
-		config, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
+		config, _, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
 		pvcInformer, _ = testutils.NewFakeInformerFor(&k8sv1.PersistentVolumeClaim{})
 		controller = NewVMIController(
-			services.NewTemplateService("a", "b", "c", "d", pvcInformer.GetStore(), virtClient, config),
+			services.NewTemplateService("a", "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config),
 			vmiInformer,
 			podInformer,
 			recorder,
@@ -202,6 +204,7 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 		vmiSource.Add(vmi)
 		mockQueue.Wait()
 	}
+
 	Context("On valid VirtualMachineInstance given with DataVolume source", func() {
 
 		It("should create a corresponding Pod on VMI creation when DataVolume is ready", func() {
@@ -215,6 +218,18 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 					},
 				},
 			})
+
+			dvPVC := &k8sv1.PersistentVolumeClaim{
+				TypeMeta: metav1.TypeMeta{
+					Kind:       "PersistentVolumeClaim",
+					APIVersion: "v1"},
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: vmi.Namespace,
+					Name:      "test1"},
+			}
+			// we are mocking a successful DataVolume. we expect the PVC to
+			// be available in the store if DV is successful.
+			pvcInformer.GetIndexer().Add(dvPVC)
 
 			dataVolume := &cdiv1.DataVolume{
 				ObjectMeta: metav1.ObjectMeta{
@@ -457,6 +472,62 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 			Expect(mockQueue.GetRateLimitedEnqueueCount()).To(Equal(0))
 			testutils.ExpectEvent(recorder, SuccessfulCreatePodReason)
 		})
+		It("should create PodScheduled and Synchronized conditions exactly once each for repeated FailedPvcNotFoundReason sync error", func() {
+
+			expectConditions := func(vmi *v1.VirtualMachineInstance) {
+				// PodScheduled and Synchronized
+				Expect(len(vmi.Status.Conditions)).To(Equal(2), "there should be exactly 2 conditions")
+
+				getType := func(c v1.VirtualMachineInstanceCondition) string { return string(c.Type) }
+				getReason := func(c v1.VirtualMachineInstanceCondition) string { return c.Reason }
+				Expect(vmi.Status.Conditions).To(
+					And(
+						ContainElement(
+							WithTransform(getType, Equal(string(v1.VirtualMachineInstanceSynchronized))),
+						),
+						ContainElement(
+							And(
+								WithTransform(getType, Equal(string(k8sv1.PodScheduled))),
+								WithTransform(getReason, Equal(k8sv1.PodReasonUnschedulable)),
+							),
+						),
+					),
+				)
+			}
+
+			vmi := NewPendingVirtualMachine("testvmi")
+			vmi.Spec.Volumes = []v1.Volume{
+				{
+					Name: "test",
+					VolumeSource: v1.VolumeSource{
+						PersistentVolumeClaim: &k8sv1.PersistentVolumeClaimVolumeSource{
+							ClaimName: "something",
+						},
+					},
+				},
+			}
+			addVirtualMachine(vmi)
+			update := vmiInterface.EXPECT().Update(gomock.Any())
+			update.Do(func(vmi *v1.VirtualMachineInstance) {
+				expectConditions(vmi)
+				vmiInformer.GetStore().Update(vmi)
+				update.Return(vmi, nil)
+			})
+
+			controller.Execute()
+			Expect(controller.Queue.Len()).To(Equal(0))
+			Expect(mockQueue.GetRateLimitedEnqueueCount()).To(Equal(1))
+
+			// make sure that during next iteration we do not add the same condition again
+			vmiInterface.EXPECT().Update(gomock.Any()).Do(func(vmi *v1.VirtualMachineInstance) {
+				expectConditions(vmi)
+			}).Return(vmi, nil)
+
+			controller.Execute()
+			Expect(controller.Queue.Len()).To(Equal(0))
+			Expect(mockQueue.GetRateLimitedEnqueueCount()).To(Equal(2))
+		})
+
 		table.DescribeTable("should move the vmi to scheduling state if a pod exists", func(phase k8sv1.PodPhase, isReady bool) {
 			vmi := NewPendingVirtualMachine("testvmi")
 			pod := NewPodForVirtualMachine(vmi, phase)
@@ -715,6 +786,21 @@ var _ = Describe("VirtualMachineInstance watcher", func() {
 
 			controller.Execute()
 		})
+		It("should update the virtual machine QOS class if the pod finally has a QOS class assigned", func() {
+			vmi := NewPendingVirtualMachine("testvmi")
+			vmi.Status.Phase = v1.Scheduling
+			pod := NewPodForVirtualMachine(vmi, k8sv1.PodRunning)
+			pod.Status.QOSClass = k8sv1.PodQOSGuaranteed
+
+			addVirtualMachine(vmi)
+			podFeeder.Add(pod)
+
+			vmiInterface.EXPECT().Update(gomock.Any()).Do(func(arg interface{}) {
+				Expect(*arg.(*v1.VirtualMachineInstance).Status.QOSClass).To(Equal(k8sv1.PodQOSGuaranteed))
+			}).Return(vmi, nil)
+
+			controller.Execute()
+		})
 		It("should update the virtual machine to scheduled if pod is ready, triggered by pod change", func() {
 			vmi := NewPendingVirtualMachine("testvmi")
 			vmi.Status.Phase = v1.Scheduling
@@ -927,6 +1013,7 @@ func NewPendingVirtualMachine(name string) *v1.VirtualMachineInstance {
 	vmi := v1.NewMinimalVMI(name)
 	vmi.UID = "1234"
 	vmi.Status.Phase = v1.Pending
+	controller.SetLatestApiVersionAnnotation(vmi)
 	return vmi
 }
 

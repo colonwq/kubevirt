@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"net/http"
 	"strings"
@@ -36,14 +35,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/json"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
 )
 
 var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component]VirtualMachineInstanceReplicaSet", func() {
 
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -75,16 +74,13 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 		// Status updates can conflict with our desire to change the spec
 		By(fmt.Sprintf("Scaling to %d", scale))
 		var s *autov1.Scale
-		for {
+		err = tests.RetryIfModified(func() error {
 			s, err = virtClient.ReplicaSet(tests.NamespaceTestDefault).GetScale(name, v12.GetOptions{})
 			ExpectWithOffset(1, err).ToNot(HaveOccurred())
 			s.Spec.Replicas = scale
 			s, err = virtClient.ReplicaSet(tests.NamespaceTestDefault).UpdateScale(name, s)
-			if errors.IsConflict(err) {
-				continue
-			}
-			break
-		}
+			return err
+		})
 
 		ExpectWithOffset(1, err).ToNot(HaveOccurred())
 
@@ -168,7 +164,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	)
 
 	table.DescribeTable("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:component]should scale with the horizontal pod autoscaler", func(startScale int, stopScale int) {
-		tests.SkipIfVersionBelow("HPA only works with CRs starting from 1.11", "1.11")
+		tests.SkipIfVersionBelow("HPA only works with CRs with multiple versions starting from 1.13", "1.13")
 		template := tests.NewRandomVMIWithEphemeralDisk(tests.ContainerDiskFor(tests.ContainerDiskCirros))
 		newRS := tests.NewRandomReplicaSetFromVMI(template, int32(1))
 		newRS, err = virtClient.ReplicaSet(tests.NamespaceTestDefault).Create(newRS)
@@ -185,7 +181,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	It("[test_id:1411]should be rejected on POST if spec is invalid", func() {
 		newRS := newReplicaSet()
 		newRS.TypeMeta = v12.TypeMeta{
-			APIVersion: v1.GroupVersion.String(),
+			APIVersion: v1.StorageGroupVersion.String(),
 			Kind:       "VirtualMachineInstanceReplicaSet",
 		}
 
@@ -297,6 +293,8 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	})
 
 	It("[test_id:1416]should remove owner references on the VirtualMachineInstance if it is orphan deleted", func() {
+		// Cascade=false delete fails in ocp 3.11 with CRDs that contain multiple versions.
+		tests.SkipIfOpenShiftAndBelowOrEqualVersion("cascade=false delete does not work with CRD multi version support in ocp 3.11", "1.11.0")
 		newRS := newReplicaSet()
 		// Create a replicaset with two replicas
 		doScale(newRS.ObjectMeta.Name, 2)
@@ -414,7 +412,7 @@ var _ = Describe("[rfe_id:588][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				return true
 			}
 			return false
-		}, 120*time.Second, time.Second).Should(Equal(true))
+		}, 120*time.Second, time.Second).Should(BeTrue())
 
 		By("Checking number of RS VM's")
 		vmis, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).List(&v12.ListOptions{})

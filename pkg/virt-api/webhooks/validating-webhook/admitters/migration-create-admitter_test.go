@@ -30,14 +30,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 )
 
 var _ = Describe("Validating MigrationCreate Admitter", func() {
-	config, configMapInformer := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
+	config, configMapInformer, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
 	migrationCreateAdmitter := &MigrationCreateAdmitter{ClusterConfig: config}
 
 	enableFeatureGate := func(featureGate string) {
@@ -76,7 +76,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 		Expect(len(resp.Result.Details.Causes)).To(Equal(1))
 		Expect(resp.Result.Details.Causes[0].Field).To(Equal("spec.vmiName"))
 	})
@@ -109,7 +109,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 	})
 
 	It("should reject valid Migration spec on create when feature gate isn't enabled", func() {
@@ -140,7 +140,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 	})
 
 	It("should reject Migration spec on create when another VMI migration is in-flight", func() {
@@ -176,7 +176,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 	})
 
 	It("should accept Migration spec on create when previous VMI migration completed", func() {
@@ -212,7 +212,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 	})
 
 	It("should reject Migration spec on create when VMI is finalized", func() {
@@ -244,7 +244,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 	})
 
 	It("should reject Migration spec for non-migratable VMIs", func() {
@@ -288,7 +288,7 @@ var _ = Describe("Validating MigrationCreate Admitter", func() {
 		}
 
 		resp := migrationCreateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 		Expect(resp.Result.Message).To(ContainSubstring("DisksNotLiveMigratable"))
 	})
 

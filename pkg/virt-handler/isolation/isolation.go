@@ -27,14 +27,24 @@ package isolation
 
 import (
 	"bufio"
+	"encoding/csv"
 	"fmt"
+	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
+	"unsafe"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/log"
+	"golang.org/x/sys/unix"
+
+	ps "github.com/mitchellh/go-ps"
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
+	"kubevirt.io/kubevirt/pkg/util"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 )
 
@@ -45,14 +55,46 @@ type PodIsolationDetector interface {
 	// It returns an IsolationResult containing all isolation information
 	Detect(vm *v1.VirtualMachineInstance) (*IsolationResult, error)
 
+	DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (*IsolationResult, error)
+
 	// Whitelist allows specifying cgroup controller which should be considered to detect the cgroup slice
 	// It returns a PodIsolationDetector to allow configuring the PodIsolationDetector via the builder pattern.
 	Whitelist(controller []string) PodIsolationDetector
+
+	// Adjust system resources to run the passed VM
+	AdjustResources(vm *v1.VirtualMachineInstance) error
+}
+
+type MountInfo struct {
+	DeviceContainingFile string
+	Root                 string
+	MountPoint           string
 }
 
 type socketBasedIsolationDetector struct {
 	socketDir  string
 	controller []string
+}
+
+func (s *socketBasedIsolationDetector) DetectForSocket(vm *v1.VirtualMachineInstance, socket string) (*IsolationResult, error) {
+	var pid int
+	var slice string
+	var err error
+	var controller []string
+
+	if pid, err = s.getPid(socket); err != nil {
+		log.Log.Object(vm).Reason(err).Errorf("Could not get owner Pid of socket %s", socket)
+		return nil, err
+
+	}
+
+	// Look up the cgroup slice based on the whitelisted controller
+	if controller, slice, err = s.getSlice(pid); err != nil {
+		log.Log.Object(vm).Reason(err).Errorf("Could not get cgroup slice for Pid %d", pid)
+		return nil, err
+	}
+
+	return NewIsolationResult(pid, slice, controller), nil
 }
 
 // NewSocketBasedIsolationDetector takes socketDir and creates a socket based IsolationDetector
@@ -77,7 +119,6 @@ func (s *socketBasedIsolationDetector) Detect(vm *v1.VirtualMachineInstance) (*I
 	if pid, err = s.getPid(socket); err != nil {
 		log.Log.Object(vm).Reason(err).Errorf("Could not get owner Pid of socket %s", socket)
 		return nil, err
-
 	}
 
 	// Look up the cgroup slice based on the whitelisted controller
@@ -87,6 +128,91 @@ func (s *socketBasedIsolationDetector) Detect(vm *v1.VirtualMachineInstance) (*I
 	}
 
 	return NewIsolationResult(pid, slice, controller), nil
+}
+
+// standard golang libraries don't provide API to set runtime limits
+// for other processes, so we have to directly call to kernel
+func prLimit(pid int, limit uintptr, rlimit *unix.Rlimit) error {
+	_, _, errno := unix.RawSyscall6(unix.SYS_PRLIMIT64,
+		uintptr(pid),
+		limit,
+		uintptr(unsafe.Pointer(rlimit)),
+		0, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("Error setting prlimit: %v", errno)
+	}
+	return nil
+}
+
+func (s *socketBasedIsolationDetector) AdjustResources(vm *v1.VirtualMachineInstance) error {
+	// only VFIO attached domains require MEMLOCK adjustment
+	if !util.IsSRIOVVmi(vm) && !util.IsGPUVMI(vm) {
+		return nil
+	}
+
+	// bump memlock ulimit for libvirtd
+	res, err := s.Detect(vm)
+	if err != nil {
+		return err
+	}
+	launcherPid := res.Pid()
+
+	processes, err := ps.Processes()
+	if err != nil {
+		return fmt.Errorf("failed to get all processes: %v", err)
+	}
+
+	for _, process := range processes {
+		// consider all processes that are virt-launcher children
+		if process.PPid() != launcherPid {
+			continue
+		}
+
+		// libvirtd process sets the memory lock limit before fork/exec-ing into qemu
+		if process.Executable() != "libvirtd" {
+			continue
+		}
+
+		// make the best estimate for memory required by libvirt
+		memlockSize, err := getMemlockSize(vm)
+		if err != nil {
+			return err
+		}
+		rLimit := unix.Rlimit{
+			Max: uint64(memlockSize),
+			Cur: uint64(memlockSize),
+		}
+		err = prLimit(process.Pid(), unix.RLIMIT_MEMLOCK, &rLimit)
+		if err != nil {
+			return fmt.Errorf("failed to set rlimit for memory lock: %v", err)
+		}
+		// we assume a single process should match
+		break
+	}
+	return nil
+}
+
+// consider reusing getMemoryOverhead()
+// This is not scientific, but neither what libvirtd does is. See details in:
+// https://www.redhat.com/archives/libvirt-users/2019-August/msg00051.html
+func getMemlockSize(vm *v1.VirtualMachineInstance) (int64, error) {
+	memlockSize := resource.NewQuantity(0, resource.DecimalSI)
+
+	// start with base memory requested for the VM
+	vmiMemoryReq := vm.Spec.Domain.Resources.Requests.Memory()
+	memlockSize.Add(*resource.NewScaledQuantity(vmiMemoryReq.ScaledValue(resource.Kilo), resource.Kilo))
+
+	// allocate 1Gb for VFIO needs
+	memlockSize.Add(resource.MustParse("1G"))
+
+	// add some more memory for NUMA / CPU topology, platform memory alignment and other needs
+	memlockSize.Add(resource.MustParse("256M"))
+
+	bytes_, ok := memlockSize.AsInt64()
+	if !ok {
+		return 0, fmt.Errorf("could not calculate memory lock size")
+	}
+	return bytes_, nil
 }
 
 func NewIsolationResult(pid int, slice string, controller []string) *IsolationResult {
@@ -105,6 +231,129 @@ func (r *IsolationResult) Slice() string {
 
 func (r *IsolationResult) PIDNamespace() string {
 	return fmt.Sprintf("/proc/%d/ns/pid", r.pid)
+}
+
+func (r *IsolationResult) MountNamespace() string {
+	return fmt.Sprintf("/proc/%d/ns/mnt", r.pid)
+}
+
+func (r *IsolationResult) mountInfo() string {
+	return fmt.Sprintf("/proc/%d/mountinfo", r.pid)
+}
+
+// MountInfoRoot returns information about the root entry in /proc/mountinfo
+func (r *IsolationResult) MountInfoRoot() (*MountInfo, error) {
+	in, err := os.Open(r.mountInfo())
+	if err != nil {
+		return nil, fmt.Errorf("could not open mountinfo: %v", err)
+	}
+	defer in.Close()
+	c := csv.NewReader(in)
+	c.Comma = ' '
+	c.LazyQuotes = true
+	for {
+		record, err := c.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if e, ok := err.(*csv.ParseError); ok {
+				if e.Err != csv.ErrFieldCount {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+		}
+
+		if record[3] == "/" && record[4] == "/" {
+			return &MountInfo{
+				DeviceContainingFile: record[2],
+				Root:                 record[3],
+				MountPoint:           record[4],
+			}, nil
+		}
+	}
+
+	//impossible
+	return nil, fmt.Errorf("process has no root entry")
+}
+
+// IsMounted checks if a path in the mount namespace of a
+// given process isolation result is a mount point. Works with symlinks.
+func (r *IsolationResult) IsMounted(mountPoint string) (bool, error) {
+	mountPoint, err := filepath.EvalSymlinks(mountPoint)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("could not resolve mount point path: %v", err)
+	}
+	in, err := os.Open(r.mountInfo())
+	if err != nil {
+		return false, fmt.Errorf("could not open mountinfo: %v", err)
+	}
+	defer in.Close()
+	c := csv.NewReader(in)
+	c.Comma = ' '
+	c.LazyQuotes = true
+	for {
+		record, err := c.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if e, ok := err.(*csv.ParseError); ok {
+				if e.Err != csv.ErrFieldCount {
+					return false, err
+				}
+			} else {
+				return false, err
+			}
+		}
+
+		if record[4] == mountPoint {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ParentMountInfoFor takes the mount info from a container, and looks the corresponding
+// entry in /proc/mountinfo of the isolation result of the given process.
+func (r *IsolationResult) ParentMountInfoFor(mountInfo *MountInfo) (*MountInfo, error) {
+	in, err := os.Open(r.mountInfo())
+	if err != nil {
+		return nil, fmt.Errorf("could not open mountinfo: %v", err)
+	}
+	defer in.Close()
+	c := csv.NewReader(in)
+	c.Comma = ' '
+	c.LazyQuotes = true
+	for {
+		record, err := c.Read()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			if e, ok := err.(*csv.ParseError); ok {
+				if e.Err != csv.ErrFieldCount {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
+		}
+
+		if record[2] == mountInfo.DeviceContainingFile {
+			return &MountInfo{
+				DeviceContainingFile: record[2],
+				Root:                 record[3],
+				MountPoint:           record[4],
+			}, nil
+		}
+	}
+	return nil, fmt.Errorf("no parent entry for %v found in the mount namespace of %d", mountInfo.DeviceContainingFile, r.pid)
 }
 
 func (r *IsolationResult) NetNamespace() string {

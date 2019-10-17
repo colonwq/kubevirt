@@ -28,7 +28,7 @@ import (
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
 )
 
 var _ = Describe("VirtualMachineInstanceMigration Mutator", func() {
@@ -50,7 +50,7 @@ var _ = Describe("VirtualMachineInstanceMigration Mutator", func() {
 		By("Mutating the Migration")
 		mutator := &MigrationCreateMutator{}
 		resp := mutator.Mutate(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 
 		By("Getting the VMI spec from the response")
 		migrationSpec := &v1.VirtualMachineInstanceMigrationSpec{}

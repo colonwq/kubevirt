@@ -38,9 +38,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
-	"kubevirt.io/kubevirt/pkg/log"
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 	cmdclient "kubevirt.io/kubevirt/pkg/virt-handler/cmd-client"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
@@ -63,7 +64,7 @@ var _ = Describe("Manager", func() {
 	if err != nil {
 		panic(err)
 	}
-	isoCreationFunc := func(isoOutFile string, inFiles []string) error {
+	isoCreationFunc := func(isoOutFile, volumeID string, inDir string) error {
 		_, err := os.Create(isoOutFile)
 		return err
 	}
@@ -87,6 +88,7 @@ var _ = Describe("Manager", func() {
 		c := &api.ConverterContext{
 			VirtualMachine: vmi,
 			UseEmulation:   true,
+			SMBios:         &cmdv1.SMBios{},
 		}
 		Expect(api.Convert_v1_VirtualMachine_To_api_Domain(vmi, domain, c)).To(Succeed())
 		api.SetObjectDefaults_Domain(domain)
@@ -111,7 +113,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().Create().Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0)
-			newspec, err := manager.SyncVMI(vmi, true)
+			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).To(BeNil())
 			Expect(newspec).ToNot(BeNil())
 		})
@@ -133,7 +135,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().Create().Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0)
-			newspec, err := manager.SyncVMI(vmi, true)
+			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).To(BeNil())
 			Expect(newspec).ToNot(BeNil())
 		})
@@ -154,7 +156,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().Create().Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0)
-			newspec, err := manager.SyncVMI(vmi, true)
+			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).To(BeNil())
 			Expect(newspec).ToNot(BeNil())
 		})
@@ -169,7 +171,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().GetState().Return(libvirt.DOMAIN_RUNNING, 1, nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0)
-			newspec, err := manager.SyncVMI(vmi, true)
+			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).To(BeNil())
 			Expect(newspec).ToNot(BeNil())
 		})
@@ -187,7 +189,7 @@ var _ = Describe("Manager", func() {
 				mockDomain.EXPECT().Create().Return(nil)
 				mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).Return(string(xml), nil)
 				manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0)
-				newspec, err := manager.SyncVMI(vmi, true)
+				newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 				Expect(err).To(BeNil())
 				Expect(newspec).ToNot(BeNil())
 			},
@@ -208,7 +210,7 @@ var _ = Describe("Manager", func() {
 			mockDomain.EXPECT().Resume().Return(nil)
 			mockDomain.EXPECT().GetXMLDesc(libvirt.DomainXMLFlags(0)).Return(string(xml), nil)
 			manager, _ := NewLibvirtDomainManager(mockConn, "fake", nil, 0)
-			newspec, err := manager.SyncVMI(vmi, true)
+			newspec, err := manager.SyncVMI(vmi, true, &cmdv1.VirtualMachineOptions{VirtualMachineSMBios: &cmdv1.SMBios{}})
 			Expect(err).To(BeNil())
 			Expect(newspec).ToNot(BeNil())
 		})
@@ -576,7 +578,8 @@ var _ = Describe("Manager", func() {
 		func(migrationType string) {
 			isBlockMigration := migrationType == "block"
 			isUnsafeMigration := migrationType == "unsafe"
-			flags := prepareMigrationFlags(isBlockMigration, isUnsafeMigration)
+			allowAutoConverge := migrationType == "autoConverge"
+			flags := prepareMigrationFlags(isBlockMigration, isUnsafeMigration, allowAutoConverge)
 			expectedMigrateFlags := libvirt.MIGRATE_LIVE | libvirt.MIGRATE_PEER2PEER
 
 			if isBlockMigration {
@@ -584,11 +587,15 @@ var _ = Describe("Manager", func() {
 			} else if migrationType == "unsafe" {
 				expectedMigrateFlags |= libvirt.MIGRATE_UNSAFE
 			}
+			if allowAutoConverge {
+				expectedMigrateFlags |= libvirt.MIGRATE_AUTO_CONVERGE
+			}
 			Expect(flags).To(Equal(expectedMigrateFlags))
 		},
 		table.Entry("with block migration", "block"),
 		table.Entry("without block migration", "live"),
 		table.Entry("unsafe migration", "unsafe"),
+		table.Entry("migration auto converge", "autoConverge"),
 	)
 
 	table.DescribeTable("on successful list all domains",
@@ -697,11 +704,51 @@ var _ = Describe("getSRIOVPCIAddresses", func() {
 	})
 })
 
-func newVMI(namespace string, name string) *v1.VirtualMachineInstance {
-	vmi := &v1.VirtualMachineInstance{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec:       v1.VirtualMachineInstanceSpec{Domain: v1.NewMinimalDomainSpec()},
-	}
+var _ = Describe("getEnvAddressListByPrefix with gpu prefix", func() {
+	It("returns empty if PCI address is not set", func() {
+		Expect(len(getEnvAddressListByPrefix(gpuEnvPrefix))).To(Equal(0))
+	})
+
+	It("returns single PCI address ", func() {
+		os.Setenv("GPU_PASSTHROUGH_DEVICES_SOME_VENDOR", "2609:19:90.0,")
+		addrs := getEnvAddressListByPrefix(gpuEnvPrefix)
+		Expect(len(addrs)).To(Equal(1))
+		Expect(addrs[0]).To(Equal("2609:19:90.0"))
+	})
+
+	It("returns multiple PCI addresses", func() {
+		os.Setenv("GPU_PASSTHROUGH_DEVICES_SOME_VENDOR", "2609:19:90.0,2609:19:90.1")
+		addrs := getEnvAddressListByPrefix(gpuEnvPrefix)
+		Expect(len(addrs)).To(Equal(2))
+		Expect(addrs[0]).To(Equal("2609:19:90.0"))
+		Expect(addrs[1]).To(Equal("2609:19:90.1"))
+	})
+})
+
+var _ = Describe("getEnvAddressListByPrefix with vgpu prefix", func() {
+	It("returns empty if Mdev Uuid is not set", func() {
+		Expect(len(getEnvAddressListByPrefix(vgpuEnvPrefix))).To(Equal(0))
+	})
+
+	It("returns single  Mdev Uuid ", func() {
+		os.Setenv("VGPU_PASSTHROUGH_DEVICES_SOME_VENDOR", "aa618089-8b16-4d01-a136-25a0f3c73123,")
+		addrs := getEnvAddressListByPrefix(vgpuEnvPrefix)
+		Expect(len(addrs)).To(Equal(1))
+		Expect(addrs[0]).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73123"))
+	})
+
+	It("returns multiple  Mdev Uuid", func() {
+		os.Setenv("VGPU_PASSTHROUGH_DEVICES_SOME_VENDOR", "aa618089-8b16-4d01-a136-25a0f3c73123,aa618089-8b16-4d01-a136-25a0f3c73124")
+		addrs := getEnvAddressListByPrefix(vgpuEnvPrefix)
+		Expect(len(addrs)).To(Equal(2))
+		Expect(addrs[0]).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73123"))
+		Expect(addrs[1]).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73124"))
+	})
+
+})
+
+func newVMI(namespace, name string) *v1.VirtualMachineInstance {
+	vmi := v1.NewMinimalVMIWithNS(namespace, name)
 	v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 	return vmi
 }

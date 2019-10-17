@@ -15,8 +15,8 @@ import (
 	k8sv1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/log"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 )
@@ -192,6 +192,7 @@ func StartLibvirt(stopChan chan struct{}) {
 
 			go func() {
 				scanner := bufio.NewScanner(reader)
+				scanner.Buffer(make([]byte, 1024), 512*1024)
 				for scanner.Scan() {
 					log.LogLibvirtLogLine(log.Log, scanner.Text())
 				}
@@ -355,6 +356,14 @@ func SetupLibvirt() error {
 	_, err = libvirtConf.WriteString("log_outputs = \"1:stderr\"\n")
 	if err != nil {
 		return err
+	}
+
+	if _, ok := os.LookupEnv("LIBVIRT_DEBUG_LOGS"); ok {
+		// see https://wiki.libvirt.org/page/DebugLogs for details
+		_, err = libvirtConf.WriteString("log_filters=\"3:remote 4:event 3:util.json 3:rpc 1:*\"\n")
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil

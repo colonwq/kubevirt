@@ -1,7 +1,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 
 	expect "github.com/google/goexpect"
@@ -10,8 +9,8 @@ import (
 	v1network "k8s.io/api/networking/v1"
 	v13 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
 )
 
@@ -41,7 +40,7 @@ func assertPingFail(ip string, vmi *v1.VirtualMachineInstance) {
 
 var _ = Describe("[rfe_id:150][crit:high][vendor:cnv-qe@redhat.com][level:component]Networkpolicy", func() {
 
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -100,13 +99,13 @@ var _ = Describe("[rfe_id:150][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("[test_id:CNV-1511] should be failed to reach vmia from vmib", func() {
+		It("[test_id:1511] should be failed to reach vmia from vmib", func() {
 			By("Connect vmia from vmib")
 			ip := vmia.Status.Interfaces[0].IP
 			assertPingFail(ip, vmib)
 		})
 
-		It("[test_id:CNV-1512] should be failed to reach vmib from vmia", func() {
+		It("[test_id:1512] should be failed to reach vmib from vmia", func() {
 			By("Connect vmib from vmia")
 			ip := vmib.Status.Interfaces[0].IP
 			assertPingFail(ip, vmia)
@@ -143,13 +142,13 @@ var _ = Describe("[rfe_id:150][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("[test_id:CNV-1513] should be successful to reach vmia from vmib", func() {
+		It("[test_id:1513] should be successful to reach vmia from vmib", func() {
 			By("Connect vmia from vmib in same namespace")
 			ip := vmia.Status.Interfaces[0].IP
 			assertPingSucceed(ip, vmib)
 		})
 
-		It("[test_id:CNV-1514] should be failed to reach vmia from vmic", func() {
+		It("[test_id:1514] should be failed to reach vmia from vmic", func() {
 			By("Connect vmia from vmic in differnet namespace")
 			ip := vmia.Status.Interfaces[0].IP
 			assertPingFail(ip, vmic)
@@ -182,19 +181,19 @@ var _ = Describe("[rfe_id:150][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			Expect(err).ToNot(HaveOccurred())
 		})
 
-		It("[test_id:CNV-1515] should be failed to reach vmia from vmic", func() {
+		It("[test_id:1515] should be failed to reach vmia from vmic", func() {
 			By("Connect vmia from vmic")
 			ip := vmia.Status.Interfaces[0].IP
 			assertPingFail(ip, vmic)
 		})
 
-		It("[test_id:CNV-1516] should be failed to reach vmia from vmib", func() {
+		It("[test_id:1516] should be failed to reach vmia from vmib", func() {
 			By("Connect vmia from vmib")
 			ip := vmia.Status.Interfaces[0].IP
 			assertPingFail(ip, vmib)
 		})
 
-		It("[test_id:CNV-1517] should be successful to reach vmib from vmic", func() {
+		It("[test_id:1517] should be successful to reach vmib from vmic", func() {
 			By("Connect vmib from vmic")
 			ip := vmib.Status.Interfaces[0].IP
 			assertPingSucceed(ip, vmic)

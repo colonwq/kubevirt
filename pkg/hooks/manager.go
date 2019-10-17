@@ -30,31 +30,32 @@ import (
 	"sync"
 	"time"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
+	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	hooksInfo "kubevirt.io/kubevirt/pkg/hooks/info"
 	hooksV1alpha1 "kubevirt.io/kubevirt/pkg/hooks/v1alpha1"
 	hooksV1alpha2 "kubevirt.io/kubevirt/pkg/hooks/v1alpha2"
-	"kubevirt.io/kubevirt/pkg/log"
 	grpcutil "kubevirt.io/kubevirt/pkg/util/net/grpc"
 	virtwrapApi "kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 )
 
 type callBackClient struct {
-	SocketPath          string
-	Version             string
-	subsribedHookPoints []*hooksInfo.HookPoint
+	SocketPath           string
+	Version              string
+	subscribedHookPoints []*hooksInfo.HookPoint
 }
 
 var manager *Manager
 var once sync.Once
 
 type Manager struct {
-	callbacksPerHookPoint map[string][]*callBackClient
+	CallbacksPerHookPoint map[string][]*callBackClient
 }
 
 func GetManager() *Manager {
 	once.Do(func() {
-		manager = &Manager{callbacksPerHookPoint: make(map[string][]*callBackClient)}
+		manager = &Manager{CallbacksPerHookPoint: make(map[string][]*callBackClient)}
 	})
 	return manager
 }
@@ -69,7 +70,7 @@ func (m *Manager) Collect(numberOfRequestedHookSidecars uint, timeout time.Durat
 	sortCallbacksPerHookPoint(callbacksPerHookPoint)
 	log.Log.Infof("Sorted all collected sidecar sockets per hook point based on their priority and name: %v", callbacksPerHookPoint)
 
-	m.callbacksPerHookPoint = callbacksPerHookPoint
+	m.CallbacksPerHookPoint = callbacksPerHookPoint
 
 	return nil
 }
@@ -105,8 +106,8 @@ func collectSideCarSockets(numberOfRequestedHookSidecars uint, timeout time.Dura
 					return nil, err
 				}
 
-				for _, subsribedHookPoint := range callBackClient.subsribedHookPoints {
-					callbacksPerHookPoint[subsribedHookPoint.GetName()] = append(callbacksPerHookPoint[subsribedHookPoint.GetName()], callBackClient)
+				for _, subscribedHookPoint := range callBackClient.subscribedHookPoints {
+					callbacksPerHookPoint[subscribedHookPoint.GetName()] = append(callbacksPerHookPoint[subscribedHookPoint.GetName()], callBackClient)
 				}
 
 				processedSockets[socket.Name()] = true
@@ -142,15 +143,15 @@ func processSideCarSocket(socketPath string) (*callBackClient, bool, error) {
 
 	if _, found := versionsSet[hooksV1alpha2.Version]; found {
 		return &callBackClient{
-			SocketPath:          socketPath,
-			Version:             hooksV1alpha2.Version,
-			subsribedHookPoints: info.GetHookPoints(),
+			SocketPath:           socketPath,
+			Version:              hooksV1alpha2.Version,
+			subscribedHookPoints: info.GetHookPoints(),
 		}, false, nil
 	} else if _, found := versionsSet[hooksV1alpha1.Version]; found {
 		return &callBackClient{
-			SocketPath:          socketPath,
-			Version:             hooksV1alpha1.Version,
-			subsribedHookPoints: info.GetHookPoints(),
+			SocketPath:           socketPath,
+			Version:              hooksV1alpha1.Version,
+			subscribedHookPoints: info.GetHookPoints(),
 		}, false, nil
 	} else {
 		return nil, false,
@@ -162,11 +163,11 @@ func processSideCarSocket(socketPath string) (*callBackClient, bool, error) {
 func sortCallbacksPerHookPoint(callbacksPerHookPoint map[string][]*callBackClient) {
 	for _, callbacks := range callbacksPerHookPoint {
 		for _, callback := range callbacks {
-			sort.Slice(callbacks, func(i, j int) bool {
-				if callback.subsribedHookPoints[i].Priority == callback.subsribedHookPoints[j].Priority {
-					return strings.Compare(callback.subsribedHookPoints[i].Name, callback.subsribedHookPoints[j].Name) < 0
+			sort.Slice(callback.subscribedHookPoints, func(i, j int) bool {
+				if callback.subscribedHookPoints[i].Priority == callback.subscribedHookPoints[j].Priority {
+					return strings.Compare(callback.subscribedHookPoints[i].Name, callback.subscribedHookPoints[j].Name) < 0
 				} else {
-					return callback.subsribedHookPoints[i].Priority > callback.subsribedHookPoints[j].Priority
+					return callback.subscribedHookPoints[i].Priority > callback.subscribedHookPoints[j].Priority
 				}
 			})
 		}
@@ -178,10 +179,9 @@ func (m *Manager) OnDefineDomain(domainSpec *virtwrapApi.DomainSpec, vmi *v1.Vir
 	if err != nil {
 		return "", fmt.Errorf("Failed to marshal domain spec: %v", domainSpec)
 	}
-	if callbacks, found := m.callbacksPerHookPoint[hooksInfo.OnDefineDomainHookPointName]; found {
+	if callbacks, found := m.CallbacksPerHookPoint[hooksInfo.OnDefineDomainHookPointName]; found {
 		for _, callback := range callbacks {
 			if callback.Version == hooksV1alpha1.Version || callback.Version == hooksV1alpha2.Version {
-
 				vmiJSON, err := json.Marshal(vmi)
 				if err != nil {
 					return "", fmt.Errorf("Failed to marshal VMI spec: %v", vmi)
@@ -227,19 +227,30 @@ func (m *Manager) OnDefineDomain(domainSpec *virtwrapApi.DomainSpec, vmi *v1.Vir
 	return string(domainSpecXML), nil
 }
 
-func (m *Manager) PreCloudInitIso(vmi *v1.VirtualMachineInstance, cloudInitData *v1.CloudInitNoCloudSource) (*v1.CloudInitNoCloudSource, error) {
-	if callbacks, found := m.callbacksPerHookPoint[hooksInfo.PreCloudInitIsoHookPointName]; found {
+func (m *Manager) PreCloudInitIso(vmi *v1.VirtualMachineInstance, cloudInitData *cloudinit.CloudInitData) (*cloudinit.CloudInitData, error) {
+	if callbacks, found := m.CallbacksPerHookPoint[hooksInfo.PreCloudInitIsoHookPointName]; found {
 		for _, callback := range callbacks {
 			if callback.Version == hooksV1alpha2.Version {
-				var resultSource *v1.CloudInitNoCloudSource
+				var resultData *cloudinit.CloudInitData
 				vmiJSON, err := json.Marshal(vmi)
 				if err != nil {
 					return cloudInitData, fmt.Errorf("Failed to marshal VMI spec: %v", vmi)
 				}
 
+				// To be backward compatible to sidecar hooks still expecting to receive the cloudinit data as a CloudInitNoCloudSource object,
+				// we need to construct a CloudInitNoCloudSource object with the user- and networkdata from the cloudInitData object.
+				cloudInitNoCloudSource := v1.CloudInitNoCloudSource{
+					UserData:    cloudInitData.UserData,
+					NetworkData: cloudInitData.NetworkData,
+				}
+				cloudInitNoCloudSourceJSON, err := json.Marshal(cloudInitNoCloudSource)
+				if err != nil {
+					return cloudInitData, fmt.Errorf("Failed to marshal CloudInitNoCloudSource: %v", cloudInitNoCloudSource)
+				}
+
 				cloudInitDataJSON, err := json.Marshal(cloudInitData)
 				if err != nil {
-					return cloudInitData, fmt.Errorf("Failed to marshal CloudInitNoCloudSource: %v", cloudInitData)
+					return cloudInitData, fmt.Errorf("Failed to marshal CloudInitData: %v", cloudInitData)
 				}
 
 				conn, err := grpcutil.DialSocketWithTimeout(callback.SocketPath, 1)
@@ -253,18 +264,34 @@ func (m *Manager) PreCloudInitIso(vmi *v1.VirtualMachineInstance, cloudInitData 
 				ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 				defer cancel()
 				result, err := client.PreCloudInitIso(ctx, &hooksV1alpha2.PreCloudInitIsoParams{
-					CloudInitData: cloudInitDataJSON,
-					Vmi:           vmiJSON,
+					CloudInitData:          cloudInitDataJSON,
+					CloudInitNoCloudSource: cloudInitNoCloudSourceJSON,
+					Vmi:                    vmiJSON,
 				})
 				if err != nil {
 					return cloudInitData, err
 				}
 
-				err = json.Unmarshal(result.GetCloudInitData(), &resultSource)
+				err = json.Unmarshal(result.GetCloudInitData(), &resultData)
 				if err != nil {
+					log.Log.Reason(err).Infof("Failed to unmarshal CloudInitData result")
 					return cloudInitData, err
 				}
-				return resultSource, nil
+				if !cloudinit.IsValidCloudInitData(resultData) {
+					// Be backwards compatible for hook sidecars still working on CloudInitNoCloudSource objects instead of CloudInitData
+					var resultNoCloudSourceData *v1.CloudInitNoCloudSource
+					err = json.Unmarshal(result.GetCloudInitNoCloudSource(), &resultNoCloudSourceData)
+					if err != nil {
+						log.Log.Reason(err).Infof("Failed to unmarshal CloudInitNoCloudSource result")
+						return cloudInitData, err
+					}
+					resultData = &cloudinit.CloudInitData{
+						DataSource:  cloudInitData.DataSource,
+						UserData:    resultNoCloudSourceData.UserData,
+						NetworkData: resultNoCloudSourceData.NetworkData,
+					}
+				}
+				return resultData, nil
 			} else {
 				panic("Should never happen, version compatibility check is done during Info call")
 			}

@@ -44,12 +44,12 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/json"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
 	diskutils "kubevirt.io/kubevirt/pkg/ephemeral-disk-utils"
 	com "kubevirt.io/kubevirt/pkg/handler-launcher-com"
 	"kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/info"
 	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
-	"kubevirt.io/kubevirt/pkg/log"
 	grpcutil "kubevirt.io/kubevirt/pkg/util/net/grpc"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/stats"
@@ -66,10 +66,11 @@ type MigrationOptions struct {
 	ProgressTimeout         int64
 	CompletionTimeoutPerGiB int64
 	UnsafeMigration         bool
+	AllowAutoConverge       bool
 }
 
 type LauncherClient interface {
-	SyncVirtualMachine(vmi *v1.VirtualMachineInstance) error
+	SyncVirtualMachine(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error
 	SyncMigrationTarget(vmi *v1.VirtualMachineInstance) error
 	ShutdownVirtualMachine(vmi *v1.VirtualMachineInstance) error
 	KillVirtualMachine(vmi *v1.VirtualMachineInstance) error
@@ -86,6 +87,11 @@ type VirtLauncherClient struct {
 	v1client cmdv1.CmdClient
 	conn     *grpc.ClientConn
 }
+
+const (
+	shortTimeout time.Duration = 5 * time.Second
+	longTimeout  time.Duration = 20 * time.Second
+)
 
 func ListAllSockets(baseDir string) ([]string, error) {
 	var socketFiles []string
@@ -133,7 +139,7 @@ func NewClient(socketPath string) (LauncherClient, error) {
 }
 
 func NewClientWithInfoClient(infoClient info.CmdInfoClient, conn *grpc.ClientConn) (LauncherClient, error) {
-	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, _ := context.WithTimeout(context.Background(), shortTimeout)
 	info, err := infoClient.Info(ctx, &info.CmdInfoRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("could not check cmd server version: %v", err)
@@ -166,7 +172,7 @@ func (c *VirtLauncherClient) Close() {
 
 func (c *VirtLauncherClient) genericSendVMICmd(cmdName string,
 	cmdFunc func(ctx context.Context, request *cmdv1.VMIRequest, opts ...grpc.CallOption) (*cmdv1.Response, error),
-	vmi *v1.VirtualMachineInstance) error {
+	vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error {
 
 	vmiJson, err := json.Marshal(vmi)
 	if err != nil {
@@ -177,9 +183,10 @@ func (c *VirtLauncherClient) genericSendVMICmd(cmdName string,
 		Vmi: &cmdv1.VMI{
 			VmiJson: vmiJson,
 		},
+		Options: options,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
 	defer cancel()
 	response, err := cmdFunc(ctx, request)
 
@@ -193,7 +200,7 @@ func handleError(err error, cmdName string, response *cmdv1.Response) error {
 	} else if err != nil {
 		msg := fmt.Sprintf("unknown error encountered sending command %s: %s", cmdName, err.Error())
 		return fmt.Errorf(msg)
-	} else if response.Success != true {
+	} else if response != nil && response.Success != true {
 		return fmt.Errorf("server error. command %s failed: %q", cmdName, response.Message)
 	}
 	return nil
@@ -232,21 +239,20 @@ func IsDisconnected(err error) bool {
 	return false
 }
 
-func (c *VirtLauncherClient) SyncVirtualMachine(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("SyncVMI", c.v1client.SyncVirtualMachine, vmi)
-
+func (c *VirtLauncherClient) SyncVirtualMachine(vmi *v1.VirtualMachineInstance, options *cmdv1.VirtualMachineOptions) error {
+	return c.genericSendVMICmd("SyncVMI", c.v1client.SyncVirtualMachine, vmi, options)
 }
 
 func (c *VirtLauncherClient) ShutdownVirtualMachine(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("Shutdown", c.v1client.ShutdownVirtualMachine, vmi)
+	return c.genericSendVMICmd("Shutdown", c.v1client.ShutdownVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
 func (c *VirtLauncherClient) KillVirtualMachine(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("Kill", c.v1client.KillVirtualMachine, vmi)
+	return c.genericSendVMICmd("Kill", c.v1client.KillVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
 func (c *VirtLauncherClient) DeleteDomain(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("Delete", c.v1client.DeleteVirtualMachine, vmi)
+	return c.genericSendVMICmd("Delete", c.v1client.DeleteVirtualMachine, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
 func (c *VirtLauncherClient) MigrateVirtualMachine(vmi *v1.VirtualMachineInstance, options *MigrationOptions) error {
@@ -268,7 +274,7 @@ func (c *VirtLauncherClient) MigrateVirtualMachine(vmi *v1.VirtualMachineInstanc
 		Options: optionsJson,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), longTimeout)
 	defer cancel()
 	response, err := c.v1client.MigrateVirtualMachine(ctx, request)
 
@@ -278,11 +284,11 @@ func (c *VirtLauncherClient) MigrateVirtualMachine(vmi *v1.VirtualMachineInstanc
 }
 
 func (c *VirtLauncherClient) CancelVirtualMachineMigration(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("CancelMigration", c.v1client.CancelVirtualMachineMigration, vmi)
+	return c.genericSendVMICmd("CancelMigration", c.v1client.CancelVirtualMachineMigration, vmi, &cmdv1.VirtualMachineOptions{})
 }
 
 func (c *VirtLauncherClient) SyncMigrationTarget(vmi *v1.VirtualMachineInstance) error {
-	return c.genericSendVMICmd("SyncMigrationTarget", c.v1client.SyncMigrationTarget, vmi)
+	return c.genericSendVMICmd("SyncMigrationTarget", c.v1client.SyncMigrationTarget, vmi, &cmdv1.VirtualMachineOptions{})
 
 }
 
@@ -292,16 +298,21 @@ func (c *VirtLauncherClient) GetDomain() (*api.Domain, bool, error) {
 	exists := false
 
 	request := &cmdv1.EmptyRequest{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
-	response, err := c.v1client.GetDomain(ctx, request)
 
-	if err = handleError(err, "GetDomain", response.Response); err != nil {
+	domainResponse, err := c.v1client.GetDomain(ctx, request)
+	var response *cmdv1.Response
+	if domainResponse != nil {
+		response = domainResponse.Response
+	}
+
+	if err = handleError(err, "GetDomain", response); err != nil {
 		return domain, exists, err
 	}
 
-	if response.Domain != "" {
-		if err := json.Unmarshal([]byte(response.Domain), domain); err != nil {
+	if domainResponse.Domain != "" {
+		if err := json.Unmarshal([]byte(domainResponse.Domain), domain); err != nil {
 			log.Log.Reason(err).Error("error unmarshalling domain")
 			return domain, exists, err
 		}
@@ -315,16 +326,21 @@ func (c *VirtLauncherClient) GetDomainStats() (*stats.DomainStats, bool, error) 
 	exists := false
 
 	request := &cmdv1.EmptyRequest{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
-	response, err := c.v1client.GetDomainStats(ctx, request)
 
-	if err = handleError(err, "GetDomainStats", response.Response); err != nil {
+	domainStatsRespose, err := c.v1client.GetDomainStats(ctx, request)
+	var response *cmdv1.Response
+	if domainStatsRespose != nil {
+		response = domainStatsRespose.Response
+	}
+
+	if err = handleError(err, "GetDomainStats", response); err != nil {
 		return stats, exists, err
 	}
 
-	if response.DomainStats != "" {
-		if err := json.Unmarshal([]byte(response.DomainStats), stats); err != nil {
+	if domainStatsRespose.DomainStats != "" {
+		if err := json.Unmarshal([]byte(domainStatsRespose.DomainStats), stats); err != nil {
 			log.Log.Reason(err).Error("error unmarshalling domain")
 			return stats, exists, err
 		}
@@ -335,7 +351,7 @@ func (c *VirtLauncherClient) GetDomainStats() (*stats.DomainStats, bool, error) 
 
 func (c *VirtLauncherClient) Ping() error {
 	request := &cmdv1.EmptyRequest{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), shortTimeout)
 	defer cancel()
 	response, err := c.v1client.Ping(ctx, request)
 

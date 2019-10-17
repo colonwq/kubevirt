@@ -29,7 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/testutils"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -37,7 +37,7 @@ import (
 
 var _ = Describe("Validating MigrationUpdate Admitter", func() {
 	migrationUpdateAdmitter := &MigrationUpdateAdmitter{}
-	_, configMapInformer := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
+	_, configMapInformer, _ := testutils.NewFakeClusterConfig(&k8sv1.ConfigMap{})
 
 	enableFeatureGate := func(featureGate string) {
 		testutils.UpdateFakeClusterConfig(configMapInformer, &k8sv1.ConfigMap{
@@ -90,7 +90,7 @@ var _ = Describe("Validating MigrationUpdate Admitter", func() {
 		}
 
 		resp := migrationUpdateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(false))
+		Expect(resp.Allowed).To(BeFalse())
 	})
 
 	It("should accept Migration on update if spec doesn't change", func() {
@@ -128,6 +128,6 @@ var _ = Describe("Validating MigrationUpdate Admitter", func() {
 		}
 
 		resp := migrationUpdateAdmitter.Admit(ar)
-		Expect(resp.Allowed).To(Equal(true))
+		Expect(resp.Allowed).To(BeTrue())
 	})
 })

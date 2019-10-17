@@ -26,7 +26,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 
-	"kubevirt.io/kubevirt/pkg/log"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/cli"
 )
@@ -135,7 +135,7 @@ func (p *AgentPoller) UpdateDomain(domain *api.Domain) {
 		select {
 		case p.domainUpdate <- domain:
 		default:
-			log.Log.Error("Failed to upate agent poller domain info")
+			log.Log.Error("Failed to update agent poller domain info")
 		}
 	}
 }

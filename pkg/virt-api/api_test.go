@@ -26,7 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 
-	"github.com/emicklei/go-restful"
+	restful "github.com/emicklei/go-restful"
 	"github.com/golang/mock/gomock"
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
@@ -39,11 +39,12 @@ import (
 	"k8s.io/client-go/util/cert"
 	aggregatorclient "k8s.io/kube-aggregator/pkg/client/clientset_generated/clientset"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
 	"kubevirt.io/kubevirt/pkg/certificates/triple"
-	"kubevirt.io/kubevirt/pkg/kubecli"
-	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/util"
+
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/virt-api/rest"
 )
 
@@ -58,7 +59,7 @@ var _ = Describe("Virt-api", func() {
 	var authorizorMock *rest.MockVirtApiAuthorizor
 	var expectedValidatingWebhooks *admissionregistrationv1beta1.ValidatingWebhookConfiguration
 	var expectedMutatingWebhooks *admissionregistrationv1beta1.MutatingWebhookConfiguration
-	subresourceAggregatedApiName := v1.SubresourceGroupVersion.Version + "." + v1.SubresourceGroupName
+	subresourceAggregatedApiName := v1.SubresourceGroupVersions[0].Version + "." + v1.SubresourceGroupVersions[0].Group
 	log.Log.SetIOWriter(GinkgoWriter)
 
 	BeforeEach(func() {
@@ -117,10 +118,6 @@ var _ = Describe("Virt-api", func() {
 		It("should generate certs the first time it is run", func() {
 			server.AppendHandlers(
 				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/api/v1/namespaces/kubevirt/secrets/"+virtApiCertSecretName),
-					ghttp.RespondWithJSONEncoded(http.StatusNotFound, nil),
-				),
-				ghttp.CombineHandlers(
 					ghttp.VerifyRequest("POST", "/api/v1/namespaces/kubevirt/secrets"),
 					ghttp.RespondWithJSONEncoded(http.StatusOK, nil),
 				),
@@ -164,6 +161,10 @@ var _ = Describe("Virt-api", func() {
 			}
 
 			server.AppendHandlers(
+				ghttp.CombineHandlers(
+					ghttp.VerifyRequest("POST", "/api/v1/namespaces/kubevirt/secrets"),
+					ghttp.RespondWithJSONEncoded(http.StatusConflict, nil),
+				),
 				ghttp.CombineHandlers(
 					ghttp.VerifyRequest("GET", "/api/v1/namespaces/kubevirt/secrets/"+virtApiCertSecretName),
 					ghttp.RespondWithJSONEncoded(http.StatusOK, secret),
@@ -263,7 +264,7 @@ var _ = Describe("Virt-api", func() {
 		}, 5)
 
 		It("should create apiservice endpoint if one doesn't exist", func() {
-			expectedApiService := app.subresourceApiservice()
+			expectedApiService := app.subresourceApiservice(v1.SubresourceGroupVersions[0])
 			expectedApiService.Kind = "APIService"
 			expectedApiService.APIVersion = "apiregistration.k8s.io/v1beta1"
 			server.AppendHandlers(
@@ -277,18 +278,18 @@ var _ = Describe("Virt-api", func() {
 					ghttp.RespondWithJSONEncoded(http.StatusOK, nil),
 				),
 			)
-			err := app.createSubresourceApiservice()
+			err := app.createSubresourceApiservice(v1.SubresourceGroupVersions[0])
 			Expect(err).ToNot(HaveOccurred())
 		}, 5)
 
 		It("should update apiservice endpoint if one does exist", func() {
-			expectedApiService := app.subresourceApiservice()
+			expectedApiService := app.subresourceApiservice(v1.SubresourceGroupVersions[0])
 			expectedApiService.Kind = "APIService"
 			expectedApiService.APIVersion = "apiregistration.k8s.io/v1beta1"
 			server.AppendHandlers(
 				ghttp.CombineHandlers(
 					ghttp.VerifyRequest("GET", "/apis/apiregistration.k8s.io/v1beta1/apiservices/"+subresourceAggregatedApiName),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, app.subresourceApiservice()),
+					ghttp.RespondWithJSONEncoded(http.StatusOK, app.subresourceApiservice(v1.SubresourceGroupVersions[0])),
 				),
 				ghttp.CombineHandlers(
 					ghttp.VerifyRequest("PUT", "/apis/apiregistration.k8s.io/v1beta1/apiservices/"+subresourceAggregatedApiName),
@@ -296,21 +297,8 @@ var _ = Describe("Virt-api", func() {
 					ghttp.RespondWithJSONEncoded(http.StatusOK, nil),
 				),
 			)
-			err := app.createSubresourceApiservice()
+			err := app.createSubresourceApiservice(v1.SubresourceGroupVersions[0])
 			Expect(err).ToNot(HaveOccurred())
-		}, 5)
-
-		It("should fail if apiservice is at different namespace", func() {
-			badApiService := app.subresourceApiservice()
-			badApiService.Spec.Service.Namespace = "differentnamespace"
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/apiregistration.k8s.io/v1beta1/apiservices/"+subresourceAggregatedApiName),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, badApiService),
-				),
-			)
-			err := app.createSubresourceApiservice()
-			Expect(err).To(HaveOccurred())
 		}, 5)
 
 		It("should return internal error on authorizor error", func() {
@@ -447,20 +435,6 @@ var _ = Describe("Virt-api", func() {
 			Expect(err).ToNot(HaveOccurred())
 		}, 5)
 
-		It("should fail if validating webhook service at different namespace", func() {
-			expectedValidatingWebhooks.Webhooks[0].ClientConfig.Service.Namespace = "WrongNamespace"
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/admissionregistration.k8s.io/v1beta1/validatingwebhookconfigurations/virt-api-validator"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, expectedValidatingWebhooks),
-				),
-			)
-
-			err := app.createValidatingWebhook()
-			Expect(err).To(HaveOccurred())
-		}, 5)
-
 		It("should register mutating webhook if not found", func() {
 			server.AppendHandlers(
 				ghttp.CombineHandlers(
@@ -495,25 +469,10 @@ var _ = Describe("Virt-api", func() {
 			Expect(err).ToNot(HaveOccurred())
 		}, 5)
 
-		It("should fail if validating webhook service at different namespace", func() {
-
-			expectedMutatingWebhooks.Webhooks[0].ClientConfig.Service.Namespace = "WrongNamespace"
-
-			server.AppendHandlers(
-				ghttp.CombineHandlers(
-					ghttp.VerifyRequest("GET", "/apis/admissionregistration.k8s.io/v1beta1/mutatingwebhookconfigurations/virt-api-mutator"),
-					ghttp.RespondWithJSONEncoded(http.StatusOK, expectedMutatingWebhooks),
-				),
-			)
-
-			err := app.createMutatingWebhook()
-			Expect(err).To(HaveOccurred())
-		}, 5)
-
 		It("should have default values for flags", func() {
 			app.AddFlags()
 			Expect(app.SwaggerUI).To(Equal("third_party/swagger-ui"))
-			Expect(app.SubresourcesOnly).To(Equal(false))
+			Expect(app.SubresourcesOnly).To(BeFalse())
 		}, 5)
 
 	})

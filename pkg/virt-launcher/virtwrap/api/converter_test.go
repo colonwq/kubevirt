@@ -32,10 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	k8smeta "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
 )
 
 var _ = Describe("Converter", func() {
+
+	TestSmbios := &cmdv1.SMBios{}
 
 	Context("with v1.Disk", func() {
 		It("Should add boot order when provided", func() {
@@ -234,6 +237,10 @@ var _ = Describe("Converter", func() {
 					Cache: "writethrough",
 				},
 				{
+					Name:  "dv_block_test",
+					Cache: "writethrough",
+				},
+				{
 					Name: "serviceaccount_test",
 				},
 			}
@@ -343,6 +350,14 @@ var _ = Describe("Converter", func() {
 					},
 				},
 				{
+					Name: "dv_block_test",
+					VolumeSource: v1.VolumeSource{
+						DataVolume: &v1.DataVolumeSource{
+							Name: "dv_block_test",
+						},
+					},
+				},
+				{
 					Name: "serviceaccount_test",
 					VolumeSource: v1.VolumeSource{
 						ServiceAccount: &v1.ServiceAccountVolumeSource{
@@ -353,7 +368,7 @@ var _ = Describe("Converter", func() {
 			}
 
 			vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
-			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultNetworkInterface()}
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
 
 			vmi.Spec.Domain.Firmware = &v1.Firmware{
 				UUID:   "e4686d2c-6e8d-4335-b8fd-81bee22f4814",
@@ -371,14 +386,21 @@ var _ = Describe("Converter", func() {
   <memory unit="B">8388608</memory>
   <os>
     <type arch="x86_64" machine="q35">hvm</type>
+    <smbios mode="sysinfo"></smbios>
   </os>
   <sysinfo type="smbios">
     <system>
       <entry name="uuid">e4686d2c-6e8d-4335-b8fd-81bee22f4814</entry>
       <entry name="serial">e4686d2c-6e8d-4335-b8fd-81bee22f4815</entry>
+      <entry name="manufacturer"></entry>
+      <entry name="family"></entry>
+      <entry name="product"></entry>
+      <entry name="sku"></entry>
+      <entry name="version"></entry>
     </system>
     <bios></bios>
     <baseBoard></baseBoard>
+    <chassis></chassis>
   </sysinfo>
   <devices>
     <interface type="bridge">
@@ -416,27 +438,27 @@ var _ = Describe("Converter", func() {
       <alias name="ua-cdrom_tray_unspecified"></alias>
     </disk>
     <disk device="cdrom" type="file">
-      <source file="/var/run/kubevirt-private/vmi-disks/volume1/disk.img"></source>
+      <source file="/var/run/kubevirt-private/vmi-disks/cdrom_tray_open/disk.img"></source>
       <target bus="sata" dev="sdb" tray="open"></target>
       <driver name="qemu" type="raw" iothread="1"></driver>
       <readonly></readonly>
       <alias name="ua-cdrom_tray_open"></alias>
     </disk>
     <disk device="floppy" type="file">
-      <source file="/var/run/kubevirt-private/vmi-disks/volume2/disk.img"></source>
+      <source file="/var/run/kubevirt-private/vmi-disks/floppy_tray_unspecified/disk.img"></source>
       <target bus="fdc" dev="fda" tray="closed"></target>
       <driver name="qemu" type="raw" iothread="1"></driver>
       <alias name="ua-floppy_tray_unspecified"></alias>
     </disk>
     <disk device="floppy" type="file">
-      <source file="/var/run/kubevirt-private/vmi-disks/volume3/disk.img"></source>
+      <source file="/var/run/kubevirt-private/vmi-disks/floppy_tray_open/disk.img"></source>
       <target bus="fdc" dev="fdb" tray="open"></target>
       <driver name="qemu" type="raw" iothread="1"></driver>
       <readonly></readonly>
       <alias name="ua-floppy_tray_open"></alias>
     </disk>
     <disk device="disk" type="file">
-      <source file="/var/run/kubevirt-private/vmi-disks/volume4/disk.img"></source>
+      <source file="/var/run/kubevirt-private/vmi-disks/should_default_to_disk/disk.img"></source>
       <target bus="sata" dev="sdc"></target>
       <driver name="qemu" type="raw" iothread="1"></driver>
       <alias name="ua-should_default_to_disk"></alias>
@@ -471,9 +493,15 @@ var _ = Describe("Converter", func() {
       <driver cache="writethrough" name="qemu" type="raw" iothread="1"></driver>
       <alias name="ua-pvc_block_test"></alias>
     </disk>
+    <disk device="disk" type="block">
+      <source dev="/dev/dv_block_test"></source>
+      <target bus="sata" dev="sdh"></target>
+      <driver cache="writethrough" name="qemu" type="raw" iothread="1"></driver>
+      <alias name="ua-dv_block_test"></alias>
+    </disk>
     <disk device="disk" type="file">
       <source file="/var/run/kubevirt-private/service-account-disk/service-account.iso"></source>
-      <target bus="sata" dev="sdh"></target>
+      <target bus="sata" dev="sdi"></target>
       <driver name="qemu" type="raw" iothread="1"></driver>
       <alias name="ua-serviceaccount_test"></alias>
     </disk>
@@ -541,6 +569,8 @@ var _ = Describe("Converter", func() {
 
 		isBlockPVCMap := make(map[string]bool)
 		isBlockPVCMap["pvc_block_test"] = true
+		isBlockDVMap := make(map[string]bool)
+		isBlockDVMap["dv_block_test"] = true
 		BeforeEach(func() {
 			c = &ConverterContext{
 				VirtualMachine: vmi,
@@ -553,7 +583,10 @@ var _ = Describe("Converter", func() {
 				},
 				UseEmulation: true,
 				IsBlockPVC:   isBlockPVCMap,
+				IsBlockDV:    isBlockDVMap,
 				SRIOVDevices: map[string][]string{},
+				SMBios:       TestSmbios,
+				GpuDevices:   []string{},
 			}
 		})
 
@@ -757,11 +790,25 @@ var _ = Describe("Converter", func() {
 			disabled := false
 			for _, controller := range domain.Spec.Devices.Controllers {
 				if controller.Type == "usb" && controller.Model == "none" {
-					disabled = !disabled
+					disabled = true
 				}
 			}
 
-			Expect(disabled).To(Equal(false), "Expect controller not to be disabled")
+			Expect(disabled).To(BeFalse(), "Expect controller not to be disabled")
+		})
+
+		It("should not disable usb controller when device with no bus is present", func() {
+			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+			vmi.Spec.Domain.Devices.Inputs[0].Bus = ""
+			domain := vmiToDomain(vmi, c)
+			disabled := false
+			for _, controller := range domain.Spec.Devices.Controllers {
+				if controller.Type == "usb" && controller.Model == "none" {
+					disabled = true
+				}
+			}
+
+			Expect(disabled).To(BeFalse(), "Expect controller not to be disabled")
 		})
 
 		It("should fail when input device is set to ps2 bus", func() {
@@ -926,13 +973,14 @@ var _ = Describe("Converter", func() {
 					},
 				},
 				UseEmulation: true,
+				SMBios:       TestSmbios,
 			}
 		})
 
 		It("should fail to convert if non network source are present", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			name := "otherName"
-			iface := v1.DefaultNetworkInterface()
+			iface := v1.DefaultBridgeNetworkInterface()
 			net := v1.DefaultPodNetwork()
 			iface.Name = name
 			net.Name = name
@@ -1000,7 +1048,7 @@ var _ = Describe("Converter", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			name1 := "Name"
 
-			iface1 := v1.DefaultNetworkInterface()
+			iface1 := v1.DefaultBridgeNetworkInterface()
 			iface1.Name = name1
 			net1 := v1.DefaultPodNetwork()
 			net1.Name = name1
@@ -1026,9 +1074,9 @@ var _ = Describe("Converter", func() {
 		It("Should set domain interface source correctly for multus", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
-				*v1.DefaultNetworkInterface(),
-				*v1.DefaultNetworkInterface(),
-				*v1.DefaultNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
 			}
 			vmi.Spec.Domain.Devices.Interfaces[0].Name = "red1"
 			vmi.Spec.Domain.Devices.Interfaces[1].Name = "red2"
@@ -1064,8 +1112,8 @@ var _ = Describe("Converter", func() {
 		It("Should set domain interface source correctly for default multus", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
-				*v1.DefaultNetworkInterface(),
-				*v1.DefaultNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
 			}
 			vmi.Spec.Domain.Devices.Interfaces[0].Name = "red1"
 			vmi.Spec.Domain.Devices.Interfaces[1].Name = "red2"
@@ -1093,8 +1141,8 @@ var _ = Describe("Converter", func() {
 		It("Should set domain interface source correctly for genie", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{
-				*v1.DefaultNetworkInterface(),
-				*v1.DefaultNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
+				*v1.DefaultBridgeNetworkInterface(),
 			}
 			vmi.Spec.Domain.Devices.Interfaces[0].Name = "red1"
 			vmi.Spec.Domain.Devices.Interfaces[1].Name = "red2"
@@ -1123,8 +1171,8 @@ var _ = Describe("Converter", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			name1 := "Name1"
 			name2 := "Name2"
-			iface1 := v1.DefaultNetworkInterface()
-			iface2 := v1.DefaultNetworkInterface()
+			iface1 := v1.DefaultBridgeNetworkInterface()
+			iface2 := v1.DefaultBridgeNetworkInterface()
 			net1 := v1.DefaultPodNetwork()
 			net2 := v1.DefaultPodNetwork()
 			iface1.Name = name1
@@ -1168,7 +1216,7 @@ var _ = Describe("Converter", func() {
 			net1 := v1.DefaultPodNetwork()
 			net1.Name = name1
 
-			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{iface1, *v1.DefaultNetworkInterface()}
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{iface1, *v1.DefaultBridgeNetworkInterface()}
 			vmi.Spec.Domain.Devices.Interfaces[1].Name = "red1"
 
 			vmi.Spec.Networks = []v1.Network{*net1,
@@ -1446,7 +1494,7 @@ var _ = Describe("Converter", func() {
 
 			v1Disk := v1.Disk{
 				DiskDevice: v1.DiskDevice{
-					Disk: &v1.DiskTarget{},
+					Disk: &v1.DiskTarget{Bus: "virtio"},
 				},
 			}
 			apiDisk := Disk{}
@@ -1473,7 +1521,7 @@ var _ = Describe("Converter", func() {
 		It("should honor multiQueue setting", func() {
 			var expectedQueues uint = 2
 
-			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
+			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true, SMBios: &cmdv1.SMBios{}})
 			Expect(*(domain.Spec.Devices.Disks[0].Driver.Queues)).To(Equal(expectedQueues),
 				"expected number of queues to equal number of requested CPUs")
 		})
@@ -1505,6 +1553,7 @@ var _ = Describe("Converter", func() {
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
 			c := &ConverterContext{CPUSet: []int{5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20},
 				UseEmulation: true,
+				SMBios:       &cmdv1.SMBios{},
 			}
 			domain := vmiToDomain(vmi, c)
 			domain.Spec.IOThreads = &IOThreads{}
@@ -1557,6 +1606,8 @@ var _ = Describe("Converter", func() {
 				},
 			}
 			v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+			vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
+			vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
 
 			vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue = True()
 			vmi.Spec.Domain.Resources.Requests = k8sv1.ResourceList{
@@ -1570,7 +1621,19 @@ var _ = Describe("Converter", func() {
 
 			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
 			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedQueues),
-				"expected number of queues to equal number of requested CPUs")
+				"expected number of queues to equal number of requested vCPUs")
+		})
+		It("should assign queues to a device if requested based on vcpus", func() {
+			var expectedQueues uint = 4
+
+			vmi.Spec.Domain.CPU = &v1.CPU{
+				Cores:   2,
+				Sockets: 1,
+				Threads: 2,
+			}
+			domain := vmiToDomain(vmi, &ConverterContext{UseEmulation: true})
+			Expect(*(domain.Spec.Devices.Interfaces[0].Driver.Queues)).To(Equal(expectedQueues),
+				"expected number of queues to equal number of requested vCPUs")
 		})
 
 		It("should not assign queues to a non-virtio devices", func() {
@@ -1589,6 +1652,8 @@ var _ = Describe("Converter", func() {
 			},
 		}
 		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+		vmi.Spec.Networks = []v1.Network{*v1.DefaultPodNetwork()}
+		vmi.Spec.Domain.Devices.Interfaces = []v1.Interface{*v1.DefaultBridgeNetworkInterface()}
 
 		sriovInterface := v1.Interface{
 			Name: "sriov",
@@ -1712,6 +1777,73 @@ var _ = Describe("Converter", func() {
 				Expect(domainSpec.OS.NVRam.Template).To(Equal(EFIVarsPath))
 				Expect(domainSpec.OS.NVRam.NVRam).To(Equal("/tmp/mynamespace_testvmi"))
 			})
+		})
+	})
+
+	Context("GPU resource request", func() {
+		vmi := &v1.VirtualMachineInstance{
+			ObjectMeta: k8smeta.ObjectMeta{
+				Name:      "testvmi",
+				Namespace: "mynamespace",
+				UID:       "1234",
+			},
+			Spec: v1.VirtualMachineInstanceSpec{
+				Domain: v1.DomainSpec{
+					Devices: v1.Devices{
+						GPUs: []v1.GPU{
+							v1.GPU{
+								Name: "vendor.com/gpu_name",
+							},
+						},
+					},
+				},
+			},
+		}
+
+		v1.SetObjectDefaults_VirtualMachineInstance(vmi)
+
+		It("should convert GPU resource request into host devices", func() {
+			c := &ConverterContext{
+				UseEmulation: true,
+				GpuDevices:   []string{"2609:19:90.0", "2609:19:90.1"},
+			}
+
+			domain := vmiToDomain(vmi, c)
+
+			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
+			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("pci"))
+			Expect(domain.Spec.Devices.HostDevices[0].Managed).To(Equal("yes"))
+			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Domain).To(Equal("0x2609"))
+			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Bus).To(Equal("0x19"))
+			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Slot).To(Equal("0x90"))
+			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.Function).To(Equal("0x0"))
+			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("pci"))
+			Expect(domain.Spec.Devices.HostDevices[1].Managed).To(Equal("yes"))
+			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Domain).To(Equal("0x2609"))
+			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Bus).To(Equal("0x19"))
+			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Slot).To(Equal("0x90"))
+			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.Function).To(Equal("0x1"))
+
+		})
+
+		It("should convert GPU resource request into host devices for VGPU", func() {
+			c := &ConverterContext{
+				UseEmulation: true,
+				VgpuDevices:  []string{"aa618089-8b16-4d01-a136-25a0f3c73123", "aa618089-8b16-4d01-a136-25a0f3c73124"},
+			}
+
+			domain := vmiToDomain(vmi, c)
+
+			Expect(len(domain.Spec.Devices.HostDevices)).To(Equal(2))
+			Expect(domain.Spec.Devices.HostDevices[0].Type).To(Equal("mdev"))
+			Expect(domain.Spec.Devices.HostDevices[0].Source.Address.UUID).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73123"))
+			Expect(domain.Spec.Devices.HostDevices[0].Mode).To(Equal("subsystem"))
+			Expect(domain.Spec.Devices.HostDevices[0].Model).To(Equal("vfio-pci"))
+			Expect(domain.Spec.Devices.HostDevices[1].Type).To(Equal("mdev"))
+			Expect(domain.Spec.Devices.HostDevices[1].Source.Address.UUID).To(Equal("aa618089-8b16-4d01-a136-25a0f3c73124"))
+			Expect(domain.Spec.Devices.HostDevices[1].Mode).To(Equal("subsystem"))
+			Expect(domain.Spec.Devices.HostDevices[1].Model).To(Equal("vfio-pci"))
+
 		})
 	})
 })

@@ -33,15 +33,17 @@ import (
 	k8sv1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/log"
+	"kubevirt.io/client-go/precond"
 	cloudinit "kubevirt.io/kubevirt/pkg/cloud-init"
 	"kubevirt.io/kubevirt/pkg/config"
 	containerdisk "kubevirt.io/kubevirt/pkg/container-disk"
 	"kubevirt.io/kubevirt/pkg/emptydisk"
 	ephemeraldisk "kubevirt.io/kubevirt/pkg/ephemeral-disk"
+	cmdv1 "kubevirt.io/kubevirt/pkg/handler-launcher-com/cmd/v1"
+	hostdisk "kubevirt.io/kubevirt/pkg/host-disk"
 	"kubevirt.io/kubevirt/pkg/ignition"
-	"kubevirt.io/kubevirt/pkg/log"
-	"kubevirt.io/kubevirt/pkg/precond"
 	"kubevirt.io/kubevirt/pkg/util"
 	"kubevirt.io/kubevirt/pkg/util/net/dns"
 )
@@ -54,13 +56,19 @@ const (
 	EFIVarsPath            = "/usr/share/OVMF/OVMF_VARS.fd"
 )
 
+// +k8s:deepcopy-gen=false
 type ConverterContext struct {
 	UseEmulation   bool
 	Secrets        map[string]*k8sv1.Secret
 	VirtualMachine *v1.VirtualMachineInstance
 	CPUSet         []int
 	IsBlockPVC     map[string]bool
+	IsBlockDV      map[string]bool
+	DiskType       map[string]*containerdisk.DiskInfo
 	SRIOVDevices   map[string][]string
+	SMBios         *cmdv1.SMBios
+	GpuDevices     []string
+	VgpuDevices    []string
 }
 
 func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus map[string]int, numQueues *uint) error {
@@ -107,7 +115,7 @@ func Convert_v1_Disk_To_api_Disk(diskDevice *v1.Disk, disk *Disk, devicePerBus m
 		Name:  "qemu",
 		Cache: string(diskDevice.Cache),
 	}
-	if numQueues != nil {
+	if numQueues != nil && disk.Target.Bus == "virtio" {
 		disk.Driver.Queues = numQueues
 	}
 	disk.Alias = &Alias{Name: diskDevice.Name}
@@ -219,18 +227,18 @@ func Add_Agent_To_api_Channel() (channel Channel) {
 	return
 }
 
-func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *Disk, c *ConverterContext) error {
+func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *Disk, c *ConverterContext, diskIndex int) error {
 
 	if source.ContainerDisk != nil {
-		return Convert_v1_ContainerDiskSource_To_api_Disk(source.Name, source.ContainerDisk, disk, c)
+		return Convert_v1_ContainerDiskSource_To_api_Disk(source.Name, source.ContainerDisk, disk, c, diskIndex)
 	}
 
-	if source.CloudInitNoCloud != nil {
-		return Convert_v1_CloudInitNoCloudSource_To_api_Disk(source.CloudInitNoCloud, disk, c)
+	if source.CloudInitNoCloud != nil || source.CloudInitConfigDrive != nil {
+		return Convert_v1_CloudInitSource_To_api_Disk(source.VolumeSource, disk, c)
 	}
 
 	if source.HostDisk != nil {
-		return Convert_v1_HostDisk_To_api_Disk(source.HostDisk.Path, disk, c)
+		return Convert_v1_HostDisk_To_api_Disk(source.Name, source.HostDisk.Path, disk, c)
 	}
 
 	if source.PersistentVolumeClaim != nil {
@@ -238,7 +246,7 @@ func Convert_v1_Volume_To_api_Disk(source *v1.Volume, disk *Disk, c *ConverterCo
 	}
 
 	if source.DataVolume != nil {
-		return Convert_v1_FilesystemVolumeSource_To_api_Disk(source.Name, disk, c)
+		return Convert_v1_DataVolume_To_api_Disk(source.Name, disk, c)
 	}
 
 	if source.Ephemeral != nil {
@@ -295,6 +303,13 @@ func Convert_v1_PersistentVolumeClaim_To_api_Disk(name string, disk *Disk, c *Co
 	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c)
 }
 
+func Convert_v1_DataVolume_To_api_Disk(name string, disk *Disk, c *ConverterContext) error {
+	if c.IsBlockDV[name] {
+		return Convert_v1_BlockVolumeSource_To_api_Disk(name, disk, c)
+	}
+	return Convert_v1_FilesystemVolumeSource_To_api_Disk(name, disk, c)
+}
+
 // Convert_v1_FilesystemVolumeSource_To_api_Disk takes a FS source and builds the KVM Disk representation
 func Convert_v1_FilesystemVolumeSource_To_api_Disk(volumeName string, disk *Disk, c *ConverterContext) error {
 	disk.Type = "file"
@@ -310,19 +325,28 @@ func Convert_v1_BlockVolumeSource_To_api_Disk(volumeName string, disk *Disk, c *
 	return nil
 }
 
-func Convert_v1_HostDisk_To_api_Disk(path string, disk *Disk, c *ConverterContext) error {
+func Convert_v1_HostDisk_To_api_Disk(volumeName string, path string, disk *Disk, c *ConverterContext) error {
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
-	disk.Source.File = path
+	disk.Source.File = hostdisk.GetMountedHostDiskPath(volumeName, path)
 	return nil
 }
 
-func Convert_v1_CloudInitNoCloudSource_To_api_Disk(source *v1.CloudInitNoCloudSource, disk *Disk, c *ConverterContext) error {
+func Convert_v1_CloudInitSource_To_api_Disk(source v1.VolumeSource, disk *Disk, c *ConverterContext) error {
 	if disk.Type == "lun" {
 		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.Name)
 	}
 
-	disk.Source.File = fmt.Sprintf("%s/%s", cloudinit.GetDomainBasePath(c.VirtualMachine.Name, c.VirtualMachine.Namespace), cloudinit.NoCloudFile)
+	var dataSource cloudinit.DataSourceType
+	if source.CloudInitNoCloud != nil {
+		dataSource = cloudinit.DataSourceNoCloud
+	} else if source.CloudInitConfigDrive != nil {
+		dataSource = cloudinit.DataSourceConfigDrive
+	} else {
+		return fmt.Errorf("Only nocloud and configdrive are valid cloud-init volumes")
+	}
+
+	disk.Source.File = cloudinit.GetIsoFilePath(dataSource, c.VirtualMachine.Name, c.VirtualMachine.Namespace)
 	disk.Type = "file"
 	disk.Driver.Type = "raw"
 	return nil
@@ -347,18 +371,24 @@ func Convert_v1_EmptyDiskSource_To_api_Disk(volumeName string, _ *v1.EmptyDiskSo
 	return nil
 }
 
-func Convert_v1_ContainerDiskSource_To_api_Disk(volumeName string, _ *v1.ContainerDiskSource, disk *Disk, c *ConverterContext) error {
+func Convert_v1_ContainerDiskSource_To_api_Disk(volumeName string, _ *v1.ContainerDiskSource, disk *Disk, c *ConverterContext, diskIndex int) error {
 	if disk.Type == "lun" {
 		return fmt.Errorf("device %s is of type lun. Not compatible with a file based disk", disk.Alias.Name)
 	}
-
 	disk.Type = "file"
-	diskPath, diskType, err := containerdisk.GetFilePath(c.VirtualMachine, volumeName)
-	if err != nil {
-		return err
+	disk.Driver.Type = "qcow2"
+	disk.Source.File = ephemeraldisk.GetFilePath(volumeName)
+	disk.BackingStore = &BackingStore{
+		Format: &BackingStoreFormat{},
+		Source: &DiskSource{},
 	}
-	disk.Driver.Type = diskType
-	disk.Source.File = diskPath
+
+	source := containerdisk.GenerateDiskTargetPathFromLauncherView(diskIndex)
+
+	disk.BackingStore.Format.Type = c.DiskType[volumeName].Format
+	disk.BackingStore.Source.File = source
+	disk.BackingStore.Type = "file"
+
 	return nil
 }
 
@@ -487,19 +517,6 @@ func convertFeatureState(source *v1.FeatureState) *FeatureState {
 	return nil
 }
 
-//isUSBDevicePresent checks if exists device with usb bus in vmi
-func isUSBDevicePresent(vmi *v1.VirtualMachineInstance) bool {
-	usbDeviceExists := false
-	for _, input := range vmi.Spec.Domain.Devices.Inputs {
-		if input.Bus == "usb" {
-			usbDeviceExists = true
-			return usbDeviceExists
-		}
-	}
-
-	return usbDeviceExists
-}
-
 func Convert_v1_Features_To_api_Features(source *v1.Features, features *Features, c *ConverterContext) error {
 	if source.ACPI.Enabled == nil || *source.ACPI.Enabled {
 		features.ACPI = &FeatureEnabled{}
@@ -602,6 +619,16 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	domain.ObjectMeta.Name = vmi.ObjectMeta.Name
 	domain.ObjectMeta.Namespace = vmi.ObjectMeta.Namespace
 
+	// Set VM CPU cores
+	// CPU topology will be created everytime, because user can specify
+	// number of cores in vmi.Spec.Domain.Resources.Requests/Limits, not only
+	// in vmi.Spec.Domain.CPU
+	domain.Spec.CPU.Topology = getCPUTopology(vmi)
+	domain.Spec.VCPU = &VCPU{
+		Placement: "static",
+		CPUs:      calculateRequestedVCPUs(domain.Spec.CPU.Topology),
+	}
+
 	if _, err := os.Stat("/dev/kvm"); os.IsNotExist(err) {
 		if c.UseEmulation {
 			logger := log.DefaultLogger()
@@ -668,18 +695,63 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 			domain.Spec.SysInfo.System = append(domain.Spec.SysInfo.System, Entry{Name: "serial", Value: string(vmi.Spec.Domain.Firmware.Serial)})
 		}
 	}
+	if c.SMBios != nil {
+		domain.Spec.SysInfo.System = append(domain.Spec.SysInfo.System,
+			Entry{
+				Name:  "manufacturer",
+				Value: c.SMBios.Manufacturer,
+			},
+			Entry{
+				Name:  "family",
+				Value: c.SMBios.Family,
+			},
+			Entry{
+				Name:  "product",
+				Value: c.SMBios.Product,
+			},
+			Entry{
+				Name:  "sku",
+				Value: c.SMBios.Sku,
+			},
+			Entry{
+				Name:  "version",
+				Value: c.SMBios.Version,
+			},
+		)
+	}
 
-	// Take memory from the requested memory
-	if v, ok := vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory]; ok {
-		if domain.Spec.Memory, err = QuantityToByte(v); err != nil {
-			return err
+	// Take SMBios values from the VirtualMachineOptions
+	domain.Spec.OS.SMBios = &SMBios{
+		Mode: "sysinfo",
+	}
+
+	if vmi.Spec.Domain.Chassis != nil {
+		domain.Spec.SysInfo.Chassis = []Entry{
+			{
+				Name:  "manufacturer",
+				Value: string(vmi.Spec.Domain.Chassis.Manufacturer),
+			},
+			{
+				Name:  "version",
+				Value: string(vmi.Spec.Domain.Chassis.Version),
+			},
+			{
+				Name:  "serial",
+				Value: string(vmi.Spec.Domain.Chassis.Serial),
+			},
+			{
+				Name:  "asset",
+				Value: string(vmi.Spec.Domain.Chassis.Asset),
+			},
+			{
+				Name:  "sku",
+				Value: string(vmi.Spec.Domain.Chassis.Sku),
+			},
 		}
 	}
-	// In case that guest memory is explicitly set, override it
-	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Guest != nil {
-		if domain.Spec.Memory, err = QuantityToByte(*vmi.Spec.Domain.Memory.Guest); err != nil {
-			return err
-		}
+
+	if domain.Spec.Memory, err = QuantityToByte(*getVirtualMemory(vmi)); err != nil {
+		return err
 	}
 
 	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Hugepages != nil {
@@ -688,9 +760,11 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		}
 	}
 
+	volumeIndices := map[string]int{}
 	volumes := map[string]*v1.Volume{}
-	for _, volume := range vmi.Spec.Volumes {
+	for i, volume := range vmi.Spec.Volumes {
 		volumes[volume.Name] = volume.DeepCopy()
+		volumeIndices[volume.Name] = i
 	}
 
 	dedicatedThreads := 0
@@ -746,24 +820,25 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	currentDedicatedThread := uint(autoThreads + 1)
 
 	var numQueues *uint
+	var numBlkQueues *uint
 	virtioBlkMQRequested := (vmi.Spec.Domain.Devices.BlockMultiQueue != nil) && (*vmi.Spec.Domain.Devices.BlockMultiQueue)
 	virtioNetMQRequested := (vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue != nil) && (*vmi.Spec.Domain.Devices.NetworkInterfaceMultiQueue)
-	if virtioBlkMQRequested || virtioNetMQRequested {
-		// Requested CPU's is guaranteed to be no greater than the limit
-		if cpuRequests, ok := vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceCPU]; ok {
-			numCPUs := uint(cpuRequests.Value())
-			numQueues = &numCPUs
-		} else if cpuLimit, ok := vmi.Spec.Domain.Resources.Limits[k8sv1.ResourceCPU]; ok {
-			numCPUs := uint(cpuLimit.Value())
-			numQueues = &numCPUs
-		}
+	vcpus := uint(calculateRequestedVCPUs(domain.Spec.CPU.Topology))
+	if vcpus == 0 {
+		vcpus = uint(1)
+	}
+	if virtioNetMQRequested {
+		numQueues = &vcpus
+	}
+	if virtioBlkMQRequested {
+		numBlkQueues = &vcpus
 	}
 
 	devicePerBus := make(map[string]int)
 	for _, disk := range vmi.Spec.Domain.Devices.Disks {
 		newDisk := Disk{}
 
-		err := Convert_v1_Disk_To_api_Disk(&disk, &newDisk, devicePerBus, numQueues)
+		err := Convert_v1_Disk_To_api_Disk(&disk, &newDisk, devicePerBus, numBlkQueues)
 		if err != nil {
 			return err
 		}
@@ -771,7 +846,7 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		if volume == nil {
 			return fmt.Errorf("No matching volume with name %s found", disk.Name)
 		}
-		err = Convert_v1_Volume_To_api_Disk(volume, &newDisk, c)
+		err = Convert_v1_Volume_To_api_Disk(volume, &newDisk, c, volumeIndices[disk.Name])
 		if err != nil {
 			return err
 		}
@@ -816,28 +891,32 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 		domain.Spec.Devices.Rng = newRng
 	}
 
+	isUSBDevicePresent := false
+	if vmi.Spec.Domain.Devices.Inputs != nil {
+		inputDevices := make([]Input, 0)
+		for _, input := range vmi.Spec.Domain.Devices.Inputs {
+			inputDevice := Input{}
+			err := Convert_v1_Input_To_api_InputDevice(&input, &inputDevice, c)
+			if err != nil {
+				return err
+			}
+			inputDevices = append(inputDevices, inputDevice)
+			if inputDevice.Bus == "usb" {
+				isUSBDevicePresent = true
+			}
+		}
+		domain.Spec.Devices.Inputs = inputDevices
+	}
+
 	//usb controller is turned on, only when user specify input device with usb bus,
 	//otherwise it is turned off
-	if usbDeviceExists := isUSBDevicePresent(vmi); !usbDeviceExists {
+	if !isUSBDevicePresent {
 		// disable usb controller
 		domain.Spec.Devices.Controllers = append(domain.Spec.Devices.Controllers, Controller{
 			Type:  "usb",
 			Index: "0",
 			Model: "none",
 		})
-	}
-
-	if vmi.Spec.Domain.Devices.Inputs != nil {
-		inputDevices := make([]Input, 0)
-		for _, input := range vmi.Spec.Domain.Devices.Inputs {
-			inputDevice := Input{}
-			err := Convert_v1_Input_To_api_InputDevice(&input, &inputDevice, c)
-			inputDevices = append(inputDevices, inputDevice)
-			if err != nil {
-				return err
-			}
-		}
-		domain.Spec.Devices.Inputs = inputDevices
 	}
 
 	if vmi.Spec.Domain.Clock != nil {
@@ -861,16 +940,6 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 	err = Convert_v1_Machine_To_api_OSType(apiOst, &domain.Spec.OS.Type, c)
 	if err != nil {
 		return err
-	}
-
-	// Set VM CPU cores
-	// CPU topology will be created everytime, because user can specify
-	// number of cores in vmi.Spec.Domain.Resources.Requests/Limits, not only
-	// in vmi.Spec.Domain.CPU
-	domain.Spec.CPU.Topology = getCPUTopology(vmi)
-	domain.Spec.VCPU = &VCPU{
-		Placement: "static",
-		CPUs:      calculateRequestedVCPUs(domain.Spec.CPU.Topology),
 	}
 
 	if vmi.Spec.Domain.CPU != nil {
@@ -907,6 +976,24 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 				}
 
 			}
+		}
+	}
+
+	// Append HostDevices to DomXML if GPU is requested
+	if util.IsGPUVMI(vmi) {
+		vgpuMdevUUID := append([]string{}, c.VgpuDevices...)
+		hostDevices, err := createHostDevicesFromMdevUUIDList(vgpuMdevUUID)
+		if err != nil {
+			log.Log.Reason(err).Error("Unable to parse Mdev UUID addresses")
+		} else {
+			domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, hostDevices...)
+		}
+		gpuPCIAddresses := append([]string{}, c.GpuDevices...)
+		hostDevices, err = createHostDevicesFromPCIAddresses(gpuPCIAddresses)
+		if err != nil {
+			log.Log.Reason(err).Error("Unable to parse PCI addresses")
+		} else {
+			domain.Spec.Devices.HostDevices = append(domain.Spec.Devices.HostDevices, hostDevices...)
 		}
 	}
 
@@ -1139,10 +1226,26 @@ func Convert_v1_VirtualMachine_To_api_Domain(vmi *v1.VirtualMachineInstance, dom
 			domain.Spec.QEMUCmd.QEMUArg = make([]Arg, 0)
 		}
 		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg, Arg{Value: "-fw_cfg"})
-		ignitionpath := fmt.Sprintf("%s/data.ign", ignition.GetDomainBasePath(c.VirtualMachine.Name, c.VirtualMachine.Namespace))
+		ignitionpath := fmt.Sprintf("%s/%s", ignition.GetDomainBasePath(c.VirtualMachine.Name, c.VirtualMachine.Namespace), ignition.IgnitionFile)
 		domain.Spec.QEMUCmd.QEMUArg = append(domain.Spec.QEMUCmd.QEMUArg, Arg{Value: fmt.Sprintf("name=opt/com.coreos/config,file=%s", ignitionpath)})
 	}
 	return nil
+}
+
+func getVirtualMemory(vmi *v1.VirtualMachineInstance) *resource.Quantity {
+	// In case that guest memory is explicitly set, return it
+	if vmi.Spec.Domain.Memory != nil && vmi.Spec.Domain.Memory.Guest != nil {
+		return vmi.Spec.Domain.Memory.Guest
+	}
+
+	// Otherwise, take memory from the memory-limit, if set
+	if v, ok := vmi.Spec.Domain.Resources.Limits[k8sv1.ResourceMemory]; ok {
+		return &v
+	}
+
+	// Otherwise, take memory from the requested memory
+	v, _ := vmi.Spec.Domain.Resources.Requests[k8sv1.ResourceMemory]
+	return &v
 }
 
 func getCPUTopology(vmi *v1.VirtualMachineInstance) *CPUTopology {
@@ -1347,31 +1450,25 @@ func QuantityToMebiByte(quantity resource.Quantity) (uint64, error) {
 }
 
 func boolToOnOff(value *bool, defaultOn bool) string {
-	if value == nil {
-		if defaultOn {
-			return "on"
-		}
-		return "off"
-	}
-
-	if *value {
-		return "on"
-	}
-	return "off"
+	return boolToString(value, defaultOn, "on", "off")
 }
 
 func boolToYesNo(value *bool, defaultYes bool) string {
-	if value == nil {
-		if defaultYes {
-			return "yes"
+	return boolToString(value, defaultYes, "yes", "no")
+}
+
+func boolToString(value *bool, defaultPositive bool, positive string, negative string) string {
+	toString := func(value bool) string {
+		if value {
+			return positive
 		}
-		return "no"
+		return negative
 	}
 
-	if *value {
-		return "yes"
+	if value == nil {
+		return toString(defaultPositive)
 	}
-	return "no"
+	return toString(*value)
 }
 
 // returns nameservers [][]byte, searchdomains []string, error
@@ -1410,4 +1507,47 @@ func decoratePciAddressField(addressField string) (*Address, error) {
 		Function: "0x" + dbsfFields[3],
 	}
 	return decoratedAddrField, nil
+}
+
+func createHostDevicesFromPCIAddresses(pcis []string) ([]HostDevice, error) {
+	var hds []HostDevice
+	for _, pciAddr := range pcis {
+		address, err := decoratePciAddressField(pciAddr)
+		if err != nil {
+			return nil, err
+		}
+
+		hostDev := HostDevice{
+			Source: HostDeviceSource{
+				Address: address,
+			},
+			Type:    "pci",
+			Managed: "yes",
+		}
+
+		hds = append(hds, hostDev)
+	}
+
+	return hds, nil
+}
+
+func createHostDevicesFromMdevUUIDList(mdevUuidList []string) ([]HostDevice, error) {
+	var hds []HostDevice
+	for _, mdevUuid := range mdevUuidList {
+		decoratedAddrField := &Address{
+			UUID: mdevUuid,
+		}
+
+		hostDev := HostDevice{
+			Source: HostDeviceSource{
+				Address: decoratedAddrField,
+			},
+			Type:  "mdev",
+			Mode:  "subsystem",
+			Model: "vfio-pci",
+		}
+		hds = append(hds, hostDev)
+	}
+
+	return hds, nil
 }

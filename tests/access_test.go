@@ -20,31 +20,38 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 
 	. "github.com/onsi/ginkgo"
 	"github.com/onsi/ginkgo/extensions/table"
 	. "github.com/onsi/gomega"
+	authv1 "k8s.io/api/authorization/v1"
+	authClientV1 "k8s.io/client-go/kubernetes/typed/authorization/v1"
 
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
 )
 
 var _ = Describe("[rfe_id:500][crit:high][vendor:cnv-qe@redhat.com][level:component]User Access", func() {
 
-	flag.Parse()
+	tests.FlagParse()
+
+	view := tests.ViewServiceAccountName
+	edit := tests.EditServiceAccountName
+	admin := tests.AdminServiceAccountName
+
+	var k8sClient string
 
 	BeforeEach(func() {
+		k8sClient = tests.GetK8sCmdClient()
+		tests.SkipIfNoCmd(k8sClient)
+
 		tests.BeforeTestCleanup()
 	})
 
 	Describe("With default kubevirt service accounts", func() {
-		table.DescribeTable("should verify permissions are correct for view, edit, and admin", func(resource string) {
-			tests.SkipIfNoCmd("kubectl")
-
-			view := tests.ViewServiceAccountName
-			edit := tests.EditServiceAccountName
-			admin := tests.AdminServiceAccountName
+		table.DescribeTable("should verify permissions on resources are correct for view, edit, and admin", func(resource string) {
 
 			viewVerbs := make(map[string]string)
 			editVerbs := make(map[string]string)
@@ -98,21 +105,21 @@ var _ = Describe("[rfe_id:500][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				By(fmt.Sprintf("verifying VIEW sa for verb %s", verb))
 				expectedRes, _ := viewVerbs[verb]
 				as := fmt.Sprintf("system:serviceaccount:%s:%s", namespace, view)
-				result, _, _ := tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
+				result, _, _ := tests.RunCommand(k8sClient, "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 
 				// EDIT
 				By(fmt.Sprintf("verifying EDIT sa for verb %s", verb))
 				expectedRes, _ = editVerbs[verb]
 				as = fmt.Sprintf("system:serviceaccount:%s:%s", namespace, edit)
-				result, _, _ = tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
+				result, _, _ = tests.RunCommand(k8sClient, "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 
 				// ADMIN
 				By(fmt.Sprintf("verifying ADMIN sa for verb %s", verb))
 				expectedRes, _ = adminVerbs[verb]
 				as = fmt.Sprintf("system:serviceaccount:%s:%s", namespace, admin)
-				result, _, _ = tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
+				result, _, _ = tests.RunCommand(k8sClient, "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 
 				// DEFAULT - the default should always return 'no' for ever verb.
@@ -120,14 +127,198 @@ var _ = Describe("[rfe_id:500][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				By(fmt.Sprintf("verifying DEFAULT sa for verb %s", verb))
 				expectedRes = "no"
 				as = fmt.Sprintf("system:serviceaccount:%s:default", namespace)
-				result, _, _ = tests.RunCommand("kubectl", "auth", "can-i", "--as", as, verb, resource)
+				result, _, _ = tests.RunCommand(k8sClient, "auth", "can-i", "--as", as, verb, resource)
 				Expect(result).To(ContainSubstring(expectedRes))
 			}
 		},
 			table.Entry("[test_id:526]given a vmi", "virtualmachineinstances"),
-			table.Entry("[test_id:527]given an vm", "virtualmachines"),
+			table.Entry("[test_id:527]given a vm", "virtualmachines"),
 			table.Entry("[test_id:528]given a vmi preset", "virtualmachineinstancepresets"),
 			table.Entry("[test_id:529][crit:low]given a vmi replica set", "virtualmachineinstancereplicasets"),
+			table.Entry("given a vmi migration", "virtualmachineinstancemigrations"),
 		)
+
+		var authClient *authClientV1.AuthorizationV1Client
+		It("Prepare auth client", func() {
+			virtClient, err := kubecli.GetKubevirtClient()
+			Expect(err).ToNot(HaveOccurred())
+			authClient, err = authClientV1.NewForConfig(virtClient.Config())
+			Expect(err).ToNot(HaveOccurred())
+		})
+
+		table.DescribeTable("should verify permissions on subresources are correct for view, edit, and admin", func(resource string, subresource string) {
+
+			viewVerbs := make(map[string]bool)
+			editVerbs := make(map[string]bool)
+			adminVerbs := make(map[string]bool)
+
+			// GET
+			viewVerbs["get"] = false
+			editVerbs["get"] = false
+			adminVerbs["get"] = false
+
+			// List
+			viewVerbs["list"] = false
+			editVerbs["list"] = false
+			adminVerbs["list"] = false
+
+			// WATCH
+			viewVerbs["watch"] = false
+			editVerbs["watch"] = false
+			adminVerbs["watch"] = false
+
+			// DELETE
+			viewVerbs["delete"] = false
+			editVerbs["delete"] = false
+			adminVerbs["delete"] = false
+
+			// CREATE
+			viewVerbs["create"] = false
+			editVerbs["create"] = false
+			adminVerbs["create"] = false
+
+			// UPDATE
+			viewVerbs["update"] = false
+			editVerbs["update"] = true
+			adminVerbs["update"] = true
+
+			// PATCH
+			viewVerbs["patch"] = false
+			editVerbs["patch"] = false
+			adminVerbs["patch"] = false
+
+			// DELETE COllECTION
+			viewVerbs["deleteCollection"] = false
+			editVerbs["deleteCollection"] = false
+			adminVerbs["deleteCollection"] = false
+
+			namespace := tests.NamespaceTestDefault
+			verbs := []string{"get", "list", "watch", "delete", "create", "update", "patch", "deletecollection"}
+
+			doSarRequest := func(resource string, subresource string, user string, verb string, expected bool) {
+				sar := &authv1.SubjectAccessReview{}
+				sar.Spec = authv1.SubjectAccessReviewSpec{
+					User: user,
+					ResourceAttributes: &authv1.ResourceAttributes{
+						Namespace:   namespace,
+						Verb:        verb,
+						Group:       v1.SubresourceGroupName,
+						Version:     v1.GroupVersion.Version,
+						Resource:    resource,
+						Subresource: subresource,
+					},
+				}
+				result, err := authClient.SubjectAccessReviews().Create(sar)
+				Expect(err).ToNot(HaveOccurred())
+				Expect(result.Status.Allowed).To(Equal(expected))
+			}
+
+			for _, verb := range verbs {
+				// VIEW
+				By(fmt.Sprintf("verifying VIEW sa for verb %s", verb))
+				expectedRes, _ := viewVerbs[verb]
+				user := fmt.Sprintf("system:serviceaccount:%s:%s", namespace, view)
+				doSarRequest(resource, subresource, user, verb, expectedRes)
+
+				// EDIT
+				By(fmt.Sprintf("verifying EDIT sa for verb %s", verb))
+				expectedRes, _ = editVerbs[verb]
+				user = fmt.Sprintf("system:serviceaccount:%s:%s", namespace, edit)
+				doSarRequest(resource, subresource, user, verb, expectedRes)
+
+				// ADMIN
+				By(fmt.Sprintf("verifying ADMIN sa for verb %s", verb))
+				expectedRes, _ = adminVerbs[verb]
+				user = fmt.Sprintf("system:serviceaccount:%s:%s", namespace, admin)
+				doSarRequest(resource, subresource, user, verb, expectedRes)
+
+				// DEFAULT - the default should always return 'no' for ever verb.
+				// This is primarily a sanity check.
+				By(fmt.Sprintf("verifying DEFAULT sa for verb %s", verb))
+				expectedRes = false
+				user = fmt.Sprintf("system:serviceaccount:%s:default", namespace)
+				doSarRequest(resource, subresource, user, verb, expectedRes)
+			}
+		},
+			table.Entry("on vm start", "virtualmachines", "start"),
+			table.Entry("on vm stop", "virtualmachines", "stop"),
+			table.Entry("on vm restart", "virtualmachines", "restart"),
+		)
+	})
+
+	Describe("With regular OpenShift user", func() {
+		BeforeEach(func() {
+			tests.SkipIfNoCmd("oc")
+		})
+
+		const testUser = "testuser"
+
+		testRights := func(resource, right string) {
+			verbsList := []string{"get", "list", "watch", "delete", "create", "update", "patch", "deletecollection"}
+
+			for _, verb := range verbsList {
+				// AS A TEST USER
+				By(fmt.Sprintf("verifying user rights for verb %s", verb))
+				result, _, _ := tests.RunCommand(k8sClient, "auth", "can-i", "--as", testUser, verb, resource)
+				Expect(result).To(ContainSubstring(right))
+			}
+		}
+
+		Context("should fail without admin rights for the project", func() {
+			BeforeEach(func() {
+				By("Ensuring the cluster has new test user")
+				stdOut, stdErr, err := tests.RunCommandWithNS("", k8sClient, "create", "user", testUser)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+
+				stdOut, stdErr, err = tests.RunCommandWithNS("", k8sClient, "project", tests.NamespaceTestDefault)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+			})
+
+			AfterEach(func() {
+				stdOut, stdErr, err := tests.RunCommandWithNS("", k8sClient, "delete", "user", testUser)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+			})
+
+			table.DescribeTable("should verify permissions on resources are correct for view, edit, and admin", func(resource string) {
+				testRights(resource, "no")
+			},
+				table.Entry("[test_id:2921]given a vmi", "virtualmachineinstances"),
+				table.Entry("[test_id:2915]given a vm", "virtualmachines"),
+				table.Entry("[test_id:2917]given a vmi preset", "virtualmachineinstancepresets"),
+				table.Entry("[test_id:2919]given a vmi replica set", "virtualmachineinstancereplicasets"),
+				table.Entry("given a vmi migration", "virtualmachineinstancemigrations"),
+			)
+		})
+
+		Context("should succeed with admin rights for the project", func() {
+			BeforeEach(func() {
+				By("Ensuring the cluster has new test user")
+				stdOut, stdErr, err := tests.RunCommandWithNS("", k8sClient, "create", "user", testUser)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+
+				By("Ensuring user has the admin rights for the test namespace project")
+				// This is ussually done in backgroung when creating new user with login and by creating new project by that user
+				stdOut, stdErr, err = tests.RunCommandWithNS("", k8sClient, "adm", "policy", "add-role-to-user", "-n", tests.NamespaceTestDefault, "admin", testUser)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+
+				stdOut, stdErr, err = tests.RunCommandWithNS("", k8sClient, "project", tests.NamespaceTestDefault)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+			})
+
+			AfterEach(func() {
+				stdOut, stdErr, err := tests.RunCommandWithNS("", k8sClient, "delete", "user", testUser)
+				Expect(err).ToNot(HaveOccurred(), "ERR: %s", stdOut+stdErr)
+			})
+
+			table.DescribeTable("should verify permissions on resources are correct the test user", func(resource string) {
+				testRights(resource, "yes")
+			},
+				table.Entry("[test_id:2920]given a vmi", "virtualmachineinstances"),
+				table.Entry("[test_id:2831]given a vm", "virtualmachines"),
+				table.Entry("[test_id:2916]given a vmi preset", "virtualmachineinstancepresets"),
+				table.Entry("[test_id:2918][crit:low]given a vmi replica set", "virtualmachineinstancereplicasets"),
+				table.Entry("[test_id:2837]given a vmi migration", "virtualmachineinstancemigrations"),
+			)
+		})
 	})
 })

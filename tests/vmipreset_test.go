@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"net/http"
 	"strings"
@@ -34,13 +33,13 @@ import (
 	k8smetav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/json"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/tests"
 )
 
 var _ = Describe("[rfe_id:609][crit:medium][vendor:cnv-qe@redhat.com][level:component]VMIPreset", func() {
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -90,7 +89,7 @@ var _ = Describe("[rfe_id:609][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 	Context("CRD Validation", func() {
 		It("[test_id:1595]Should reject POST if schema is invalid", func() {
 			// Preset with missing selector should fail CRD validation
-			jsonString := "{\"kind\":\"VirtualMachineInstancePreset\",\"apiVersion\":\"kubevirt.io/v1alpha3\",\"metadata\":{\"generateName\":\"test-memory-\",\"creationTimestamp\":null},\"spec\":{}}"
+			jsonString := fmt.Sprintf("{\"kind\":\"VirtualMachineInstancePreset\",\"apiVersion\":\"%s\",\"metadata\":{\"generateName\":\"test-memory-\",\"creationTimestamp\":null},\"spec\":{}}", v1.StorageGroupVersion.String())
 
 			result := virtClient.RestClient().Post().Resource("virtualmachineinstancepresets").Namespace(tests.NamespaceTestDefault).Body([]byte(jsonString)).SetHeader("Content-Type", "application/json").Do()
 
@@ -489,6 +488,78 @@ var _ = Describe("[rfe_id:609][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			Expect(newVmi10.Spec.Domain.Resources.Requests["memory"]).To(Equal(memory))
 		})
 	})
+
+	Context("[rfe_id:613]MatchLabels", func() {
+		var preset *v1.VirtualMachineInstancePreset
+		labelKey := "kubevirt.io/cpu"
+		labelValue := "dodecacore"
+		numCores := uint32(12)
+		presetName := "twelve-cores"
+
+		var annotationLabel string
+		var annotationVal string
+
+		var vmiWin7 *v1.VirtualMachineInstance
+		var vmiWin10 *v1.VirtualMachineInstance
+
+		BeforeEach(func() {
+			selector := k8smetav1.LabelSelector{
+				MatchLabels: map[string]string{
+					labelKey: labelValue,
+				},
+			}
+
+			preset = &v1.VirtualMachineInstancePreset{
+				ObjectMeta: k8smetav1.ObjectMeta{Name: presetName},
+				Spec: v1.VirtualMachineInstancePresetSpec{
+					Selector: selector,
+					Domain: &v1.DomainSpec{
+						CPU: &v1.CPU{Cores: numCores},
+					},
+				},
+			}
+
+			// The actual type of machine is unimportant here. This test is about the label
+			vmiWin7 = tests.NewRandomVMIWithEphemeralDisk(tests.ContainerDiskFor(tests.ContainerDiskAlpine))
+			vmiWin7.Labels = map[string]string{labelKey: labelValue}
+			vmiWin10 = tests.NewRandomVMIWithEphemeralDisk(tests.ContainerDiskFor(tests.ContainerDiskAlpine))
+			vmiWin10.Labels = map[string]string{labelKey: labelValue}
+
+			annotationLabel = fmt.Sprintf("virtualmachinepreset.kubevirt.io/%s", presetName)
+			annotationVal = v1.GroupVersion.String()
+		})
+
+		It("[test_id:672] Should match multiple VMs via MatchLabel", func() {
+			By("Creating preset with MatchExpression")
+			_, err := virtClient.VirtualMachineInstancePreset(tests.NamespaceTestDefault).Create(preset)
+			Expect(err).ToNot(HaveOccurred())
+
+			// Give virt-api's cache time to sync before proceeding
+			time.Sleep(3 * time.Second)
+
+			By("Creating first VirtualMachineInstance")
+			newVmi7, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmiWin7)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("Creating second VirtualMachineInstance")
+			newVmi10, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmiWin10)
+			Expect(err).ToNot(HaveOccurred())
+
+			By("Checking that preset matched the first VMI")
+			thisAnnotation, ok := newVmi7.Annotations[annotationLabel]
+			Expect(ok).To(BeTrue(), fmt.Sprintf("VMI is missing expected annotation: %s", annotationLabel))
+			Expect(thisAnnotation).To(Equal(annotationVal))
+
+			By("Checking that preset matched the second VMI")
+			thisAnnotation, ok = newVmi10.Annotations[annotationLabel]
+			Expect(ok).To(BeTrue(), fmt.Sprintf("VMI is missing expected annotation: %s", annotationLabel))
+			Expect(thisAnnotation).To(Equal(annotationVal))
+
+			By("Checking that both VMs have 12 cores")
+			Expect(newVmi7.Spec.Domain.CPU.Cores).To(Equal(numCores))
+			Expect(newVmi10.Spec.Domain.CPU.Cores).To(Equal(numCores))
+		})
+	})
 })
 
 func getPreset(virtClient kubecli.KubevirtClient, prefix string) (*v1.VirtualMachineInstancePreset, error) {
@@ -513,5 +584,5 @@ func waitForPresetDeletion(virtClient kubecli.KubevirtClient, presetName string)
 			return true
 		}
 		return false
-	}, time.Duration(60)*time.Second).Should(Equal(true), "timed out waiting for preset to be deleted")
+	}, time.Duration(60)*time.Second).Should(BeTrue(), "timed out waiting for preset to be deleted")
 }

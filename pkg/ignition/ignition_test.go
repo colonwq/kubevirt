@@ -27,7 +27,7 @@ import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
 )
 
 var _ = Describe("Ignition", func() {
@@ -57,7 +57,7 @@ var _ = Describe("Ignition", func() {
 				vmi.Annotations = map[string]string{v1.IgnitionAnnotation: data}
 				err := GenerateIgnitionLocalData(vmi, namespace)
 				Expect(err).ToNot(HaveOccurred())
-				_, err = os.Stat(fmt.Sprintf("%s/%s/%s/data.ign", tmpDir, namespace, vmName))
+				_, err = os.Stat(fmt.Sprintf("%s/%s/%s/%s", tmpDir, namespace, vmName, IgnitionFile))
 				Expect(err).ToNot(HaveOccurred())
 			})
 		})

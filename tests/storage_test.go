@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -39,9 +38,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/rand"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
-	"kubevirt.io/kubevirt/pkg/log"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/tests"
 )
@@ -53,7 +52,7 @@ const (
 type VMICreationFunc func(string) *v1.VirtualMachineInstance
 
 var _ = Describe("Storage", func() {
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -262,11 +261,6 @@ var _ = Describe("Storage", func() {
 				tests.CreateHostPathPVC(tests.CustomHostPath, "1Gi")
 			}, 120)
 
-			AfterEach(func() {
-				tests.DeletePVC(tests.CustomHostPath)
-				tests.DeletePV(tests.CustomHostPath)
-			}, 120)
-
 			It("should start vmi multiple times", func() {
 				vmi := tests.NewRandomVMIWithPVC(tests.DiskAlpineHostPath)
 				tests.AddPVCDisk(vmi, "disk1", "virtio", tests.DiskCustomHostPath)
@@ -302,17 +296,37 @@ var _ = Describe("Storage", func() {
 		Context("[rfe_id:2298][crit:medium][vendor:cnv-qe@redhat.com][level:component] With HostDisk and PVC initialization", func() {
 
 			Context("With a HostDisk defined", func() {
-				const hostDiskDir = "/data"
+
+				const hostDiskDir = "/tmp/kubevirt-hostdisks"
+				var nodeName string
+
+				BeforeEach(func() {
+					nodeName = ""
+				})
+
+				AfterEach(func() {
+					// Delete all VMIs and wait until they disappear to ensure that no disk is in use and that we can delete the whole folder
+					Expect(virtClient.RestClient().Delete().Namespace(tests.NamespaceTestDefault).Resource("virtualmachineinstances").Do().Error()).ToNot(HaveOccurred())
+					Eventually(func() int {
+						vmis, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).List(&metav1.ListOptions{})
+						Expect(err).ToNot(HaveOccurred())
+						return len(vmis.Items)
+					}, 120, 1).Should(BeZero())
+					if nodeName != "" {
+						tests.RemoveHostDiskImage(filepath.Join(hostDiskDir, "/*"), nodeName)
+					}
+				})
 
 				Context("With 'DiskExistsOrCreate' type", func() {
 					diskName := "disk-" + uuid.NewRandom().String() + ".img"
 					diskPath := filepath.Join(hostDiskDir, diskName)
-					// do not choose a specific node to run the test
-					nodeName := ""
 
-					It("[test_id:851]Should create a disk image and start", func() {
+					table.DescribeTable("Should create a disk image and start", func(driver string) {
 						By("Starting VirtualMachineInstance")
-						vmi := tests.NewRandomVMIWithHostDisk(diskPath, v1.HostDiskExistsOrCreate, nodeName)
+						// do not choose a specific node to run the test
+						vmi := tests.NewRandomVMIWithHostDisk(diskPath, v1.HostDiskExistsOrCreate, "")
+						vmi.Spec.Domain.Devices.Disks[0].DiskDevice.Disk.Bus = driver
+
 						tests.RunVMIAndExpectLaunch(vmi, 30)
 
 						By("Checking if disk.img has been created")
@@ -322,21 +336,45 @@ var _ = Describe("Storage", func() {
 							virtClient,
 							vmiPod,
 							vmiPod.Spec.Containers[0].Name,
-							[]string{"find", hostDiskDir, "-name", diskName, "-size", "1G"},
+							[]string{"find", hostdisk.GetMountedHostDiskDir("host-disk"), "-name", diskName, "-size", "1G"},
 						)
-						Expect(strings.Contains(output, diskPath)).To(BeTrue())
-
-						err = virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &metav1.DeleteOptions{})
 						Expect(err).ToNot(HaveOccurred())
+						Expect(output).To(ContainSubstring(hostdisk.GetMountedHostDiskPath("host-disk", diskPath)))
+					},
+						table.Entry("[test_id:851]with virtio driver", "virtio"),
+						table.Entry("[test_id:3057]with sata driver", "sata"),
+					)
 
-						tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
+					It("should start with multiple hostdisks in the same directory", func() {
+						By("Starting VirtualMachineInstance")
+						// do not choose a specific node to run the test
+						vmi := tests.NewRandomVMIWithHostDisk(diskPath, v1.HostDiskExistsOrCreate, "")
+						tests.AddHostDisk(vmi, filepath.Join(hostDiskDir, "another.img"), v1.HostDiskExistsOrCreate, "anotherdisk")
+						tests.RunVMIAndExpectLaunch(vmi, 30)
+
+						By("Checking if another.img has been created")
+						vmiPod := tests.GetRunningPodByVirtualMachineInstance(vmi, tests.NamespaceTestDefault)
+						nodeName = vmiPod.Spec.NodeName
+						output, err := tests.ExecuteCommandOnPod(
+							virtClient,
+							vmiPod,
+							vmiPod.Spec.Containers[0].Name,
+							[]string{"find", hostdisk.GetMountedHostDiskDir("anotherdisk"), "-size", "1G"},
+						)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(output).To(ContainSubstring(hostdisk.GetMountedHostDiskPath("anotherdisk", filepath.Join(hostDiskDir, "another.img"))))
+
+						By("Checking if disk.img has been created")
+						output, err = tests.ExecuteCommandOnPod(
+							virtClient,
+							vmiPod,
+							vmiPod.Spec.Containers[0].Name,
+							[]string{"find", hostdisk.GetMountedHostDiskDir("host-disk"), "-size", "1G"},
+						)
+						Expect(err).ToNot(HaveOccurred())
+						Expect(output).To(ContainSubstring(hostdisk.GetMountedHostDiskPath("host-disk", diskPath)))
 					})
 
-					AfterEach(func() {
-						if nodeName != "" {
-							tests.RemoveHostDiskImage(diskPath, nodeName)
-						}
-					})
 				})
 
 				Context("With 'DiskExists' type", func() {
@@ -344,7 +382,6 @@ var _ = Describe("Storage", func() {
 					diskPath := filepath.Join(hostDiskDir, diskName)
 					// it is mandatory to run a pod which is creating a disk image
 					// on the same node with a HostDisk VMI
-					var nodeName string
 
 					BeforeEach(func() {
 						// create a disk image before test
@@ -373,14 +410,10 @@ var _ = Describe("Storage", func() {
 							virtClient,
 							vmiPod,
 							vmiPod.Spec.Containers[0].Name,
-							[]string{"find", hostDiskDir, "-name", diskName},
+							[]string{"find", hostdisk.GetMountedHostDiskDir("host-disk"), "-name", diskName},
 						)
-						Expect(strings.Contains(output, diskPath)).To(BeTrue())
-
-						err = virtClient.VirtualMachineInstance(vmi.Namespace).Delete(vmi.Name, &metav1.DeleteOptions{})
 						Expect(err).ToNot(HaveOccurred())
-
-						tests.WaitForVirtualMachineToDisappearWithTimeout(vmi, 120)
+						Expect(output).To(ContainSubstring(diskName))
 					})
 
 					It("[test_id:847]Should fail with a capacity option", func() {
@@ -394,10 +427,6 @@ var _ = Describe("Storage", func() {
 						}
 						_, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 						Expect(err).To(HaveOccurred())
-					})
-
-					AfterEach(func() {
-						tests.RemoveHostDiskImage(diskPath, nodeName)
 					})
 				})
 
@@ -496,12 +525,7 @@ var _ = Describe("Storage", func() {
 
 				configureToleration := func(toleration int) {
 					By("By configuring toleration")
-					config, err := virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Get("kubevirt-config", metav1.GetOptions{})
-					ExpectWithOffset(1, err).ToNot(HaveOccurred())
-
-					config.Data[virtconfig.LessPVCSpaceTolerationKey] = strconv.Itoa(toleration)
-					_, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Update(config)
-					ExpectWithOffset(1, err).ToNot(HaveOccurred())
+					tests.UpdateClusterConfigValueAndWait(virtconfig.LessPVCSpaceTolerationKey, strconv.Itoa(toleration))
 				}
 
 				It("Should not initialize an empty PVC with a disk.img when disk is too small even with toleration", func() {
@@ -540,23 +564,15 @@ var _ = Describe("Storage", func() {
 			})
 		})
 
-		Context("With Cirros BlockMode PVC", func() {
-
-			pvName := "block-pv-" + rand.String(48)
-
+		Context("[rfe_id:2288][crit:high][vendor:cnv-qe@redhat.com][level:component] With Cirros BlockMode PVC", func() {
 			BeforeEach(func() {
 				// create a new PV and PVC (PVs can't be reused)
-				tests.CreateBlockVolumePvAndPvc(pvName, "1Gi")
-			}, 60)
+				tests.CreateBlockVolumePvAndPvc("1Gi")
+			})
 
-			AfterEach(func() {
-				// create a new PV and PVC (PVs can't be reused)
-				tests.DeletePvAndPvc(pvName)
-			}, 60)
-
-			It("should be successfully started", func() {
+			It("[test_id:1015] should be successfully started", func() {
 				// Start the VirtualMachineInstance with the PVC attached
-				vmi := tests.NewRandomVMIWithPVC(pvName)
+				vmi := tests.NewRandomVMIWithPVC(tests.BlockDiskForTest)
 				// Without userdata the hostname isn't set correctly and the login expecter fails...
 				tests.AddUserData(vmi, "cloud-init", "#!/bin/bash\necho 'hello'\n")
 
@@ -574,16 +590,17 @@ var _ = Describe("Storage", func() {
 			pvName := "test-iscsi-lun" + rand.String(48)
 
 			BeforeEach(func() {
+				tests.SkipIfVersionAboveOrEqual("re-enable this once https://github.com/kubevirt/kubevirt/issues/2272 is fixed", "1.13.3")
 				// Start a ISCSI POD and service
 				By("Creating a ISCSI POD")
 				iscsiTargetIP := tests.CreateISCSITargetPOD(tests.ContainerDiskAlpine)
-				tests.CreateISCSIPvAndPvc(pvName, "1Gi", iscsiTargetIP, k8sv1.PersistentVolumeBlock)
-			}, 60)
+				tests.CreateISCSIPvAndPvc(pvName, "1Gi", iscsiTargetIP, k8sv1.ReadWriteMany, k8sv1.PersistentVolumeBlock)
+			})
 
 			AfterEach(func() {
 				// create a new PV and PVC (PVs can't be reused)
 				tests.DeletePvAndPvc(pvName)
-			}, 60)
+			})
 
 			It("should be successfully started", func() {
 				By("Create a VMIWithPVC")
@@ -599,8 +616,8 @@ var _ = Describe("Storage", func() {
 			})
 		})
 
-		Context("With not existing PVC", func() {
-			It("should get unschedulable condition", func() {
+		Context("[rfe_id:2288][crit:high][vendor:cnv-qe@redhat.com][level:component] With not existing PVC", func() {
+			It("[test_id:1040] should get unschedulable condition", func() {
 				// Start the VirtualMachineInstance
 				pvcName := "nonExistingPVC"
 				vmi := tests.NewRandomVMIWithPVC(pvcName)
@@ -620,12 +637,26 @@ var _ = Describe("Storage", func() {
 					if len(vmi.Status.Conditions) == 0 {
 						return false
 					}
-					Expect(vmi.Status.Conditions[0].Type).To(Equal(v1.VirtualMachineInstanceConditionType(k8sv1.PodScheduled)))
-					Expect(vmi.Status.Conditions[0].Reason).To(Equal(k8sv1.PodReasonUnschedulable))
-					Expect(vmi.Status.Conditions[0].Status).To(Equal(k8sv1.ConditionFalse))
-					Expect(vmi.Status.Conditions[0].Message).To(Equal(fmt.Sprintf("failed to render launch manifest: didn't find PVC %v", pvcName)))
+
+					expectPodScheduledCondition := func(vmi *v1.VirtualMachineInstance) {
+						getType := func(c v1.VirtualMachineInstanceCondition) string { return string(c.Type) }
+						getReason := func(c v1.VirtualMachineInstanceCondition) string { return c.Reason }
+						getStatus := func(c v1.VirtualMachineInstanceCondition) k8sv1.ConditionStatus { return c.Status }
+						getMessage := func(c v1.VirtualMachineInstanceCondition) string { return c.Message }
+						Expect(vmi.Status.Conditions).To(
+							ContainElement(
+								And(
+									WithTransform(getType, Equal(string(k8sv1.PodScheduled))),
+									WithTransform(getReason, Equal(k8sv1.PodReasonUnschedulable)),
+									WithTransform(getStatus, Equal(k8sv1.ConditionFalse)),
+									WithTransform(getMessage, Equal(fmt.Sprintf("failed to render launch manifest: didn't find PVC %v", pvcName))),
+								),
+							),
+						)
+					}
+					expectPodScheduledCondition(vmi)
 					return true
-				}, time.Duration(10)*time.Second).Should(Equal(true), "Timed out waiting for VMI to get Unschedulable condition")
+				}, time.Duration(10)*time.Second).Should(BeTrue(), "Timed out waiting for VMI to get Unschedulable condition")
 
 			})
 		})

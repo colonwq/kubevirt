@@ -25,7 +25,7 @@ import (
 
 	"k8s.io/api/admission/v1beta1"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
 	"kubevirt.io/kubevirt/pkg/virt-api/webhooks"
 )
 
@@ -33,7 +33,7 @@ type MigrationCreateMutator struct {
 }
 
 func (mutator *MigrationCreateMutator) Mutate(ar *v1beta1.AdmissionReview) *v1beta1.AdmissionResponse {
-	if ar.Request.Resource != webhooks.MigrationGroupVersionResource {
+	if !webhooks.ValidateRequestResource(ar.Request.Resource, webhooks.MigrationGroupVersionResource.Group, webhooks.MigrationGroupVersionResource.Resource) {
 		err := fmt.Errorf("expect resource to be '%s'", webhooks.MigrationGroupVersionResource.Resource)
 		return webhooks.ToAdmissionResponseError(err)
 	}

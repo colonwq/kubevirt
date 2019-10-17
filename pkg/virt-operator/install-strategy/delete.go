@@ -23,19 +23,21 @@ import (
 	"encoding/json"
 	"fmt"
 
+	promv1 "github.com/coreos/prometheus-operator/pkg/apis/monitoring/v1"
 	secv1 "github.com/openshift/api/security/v1"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	policyv1beta1 "k8s.io/api/policy/v1beta1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	extv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
 	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/kubecli"
-	"kubevirt.io/kubevirt/pkg/log"
 	"kubevirt.io/kubevirt/pkg/virt-operator/util"
 )
 
@@ -136,13 +138,33 @@ func DeleteAll(kv *v1.KubeVirt,
 		}
 	}
 
+	// delete podDisruptionBudgets
+	objects = stores.PodDisruptionBudgetCache.List()
+	for _, obj := range objects {
+		if pdb, ok := obj.(*policyv1beta1.PodDisruptionBudget); ok && pdb.DeletionTimestamp == nil {
+			if key, err := controller.KeyFunc(pdb); err == nil {
+				pdbClient := clientset.PolicyV1beta1().PodDisruptionBudgets(pdb.Namespace)
+				expectations.PodDisruptionBudget.AddExpectedDeletion(kvkey, key)
+				err = pdbClient.Delete(pdb.Name, &metav1.DeleteOptions{})
+				if err != nil {
+					expectations.PodDisruptionBudget.DeletionObserved(kvkey, key)
+					log.Log.Errorf("Failed to delete %s: %v", pdb.Name, err)
+					return err
+				}
+			}
+		} else if !ok {
+			log.Log.Errorf("Cast failed! obj: %+v", obj)
+			return nil
+		}
+	}
+
 	// delete deployments
 	objects = stores.DeploymentCache.List()
 	for _, obj := range objects {
 		if depl, ok := obj.(*appsv1.Deployment); ok && depl.DeletionTimestamp == nil {
 			if key, err := controller.KeyFunc(depl); err == nil {
 				expectations.Deployment.AddExpectedDeletion(kvkey, key)
-				err := clientset.AppsV1().Deployments(depl.Namespace).Delete(depl.Name, deleteOptions)
+				err = clientset.AppsV1().Deployments(depl.Namespace).Delete(depl.Name, deleteOptions)
 				if err != nil {
 					expectations.Deployment.DeletionObserved(kvkey, key)
 					log.Log.Errorf("Failed to delete %s: %v", depl.Name, err)
@@ -167,6 +189,27 @@ func DeleteAll(kv *v1.KubeVirt,
 					log.Log.Errorf("Failed to delete service %+v: %v", svc, err)
 					return err
 				}
+			}
+		} else if !ok {
+			log.Log.Errorf("Cast failed! obj: %+v", obj)
+			return nil
+		}
+	}
+
+	// delete serviceMonitor
+	prometheusClient := clientset.PrometheusClient()
+	objects = stores.ServiceMonitorCache.List()
+	for _, obj := range objects {
+		if serviceMonitor, ok := obj.(*promv1.ServiceMonitor); ok && serviceMonitor.DeletionTimestamp == nil {
+			if key, err := controller.KeyFunc(serviceMonitor); err == nil {
+				expectations.ServiceMonitor.AddExpectedDeletion(kvkey, key)
+				err := prometheusClient.MonitoringV1().ServiceMonitors(serviceMonitor.Namespace).Delete(serviceMonitor.Name, deleteOptions)
+				if false && err != nil {
+					expectations.ServiceMonitor.DeletionObserved(kvkey, key)
+					log.Log.Errorf("Failed to delete serviceMonitor %+v: %v", serviceMonitor, err)
+					return err
+				}
+				expectations.ServiceMonitor.DeletionObserved(kvkey, key)
 			}
 		} else if !ok {
 			log.Log.Errorf("Cast failed! obj: %+v", obj)
@@ -308,6 +351,30 @@ func DeleteAll(kv *v1.KubeVirt,
 			if err != nil {
 				return fmt.Errorf("unable to patch scc: %v", err)
 			}
+		}
+	}
+
+	objects = stores.SCCCache.List()
+	for _, obj := range objects {
+		if s, ok := obj.(*secv1.SecurityContextConstraints); ok && s.DeletionTimestamp == nil {
+
+			// informer watches all SCC objects, it cannot be changed because of kubevirt updates
+			if !util.IsManagedByOperator(s.GetLabels()) {
+				continue
+			}
+
+			if key, err := controller.KeyFunc(s); err == nil {
+				expectations.SCC.AddExpectedDeletion(kvkey, key)
+				err := scc.SecurityContextConstraints().Delete(s.Name, deleteOptions)
+				if err != nil {
+					expectations.SCC.DeletionObserved(kvkey, key)
+					log.Log.Errorf("Failed to delete SecurityContextConstraints %+v: %v", s, err)
+					return err
+				}
+			}
+		} else if !ok {
+			log.Log.Errorf("Cast failed! obj: %+v", obj)
+			return nil
 		}
 	}
 

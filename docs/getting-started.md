@@ -3,7 +3,7 @@
 A quick start guide to get KubeVirt up and running inside our container based
 development cluster.
 
-## I just want it built and run it on my cluser
+## I just want it built and run it on my cluster
 
 First, point the `Makefile` to the docker registry of your choice:
 
@@ -94,6 +94,17 @@ export KUBEVIRT_MEMORY_SIZE=8192M # node has 8GB memory size
 make cluster-up
 ```
 
+*NOTE* if you see following error, can check the MTU of the container and the host
+if they are different, try to make it same. See [issue 2667](https://github.com/kubevirt/kubevirt/issues/2667)
+for more detailed info.
+```
+# ./cluster-up/kubectl.sh get pods --all-namespaces
+NAMESPACE     NAME                                      READY   STATUS             RESTARTS   AGE
+cdi           cdi-operator-5db567b486-grtk9             0/1     ImagePullBackOff   0          42m
+
+Back-off pulling image "kubevirt/cdi-operator:v1.10.1"
+```
+
 To destroy the created cluster, type
 
 ```
@@ -105,19 +116,19 @@ have a completely fresh cluster to play with.
 
 ### Accessing the containerized nodes via ssh
 
-The containerized nodes are named starting from `node01`, `node02`, and so
-forth. `node01` is always the master of the cluster.
-
-Every node can be accessed via its name:
+Based on the used cluster, node names might be different.
+You can get the names from following command:
 
 ```bash
-cluster/cli.sh ssh node01
+# cluster-up/kubectl.sh get nodes
+NAME                        STATUS   ROLES    AGE   VERSION
+kind-1.14.2-control-plane   Ready    master   11h   v1.14.2
 ```
 
-To execute a remote command, e.g `ls`, simply type
-
-```bash
-cluster/cli.sh ssh node01 -- ls -lh
+Then you can execute the following command to access the node:
+```
+# ./cluster-up/ssh.sh kind-1.14.2-control-plane
+root@kind-1:/#
 ```
 
 ### Automatic Code Generation
@@ -148,7 +159,7 @@ After a successful build you can run the *unit tests*:
 
 They do not need a running KubeVirt environment to succeed.
 To run the *functional tests*, make sure you have set
-up a dockerizied environment. Then run
+up a dockerized environment. Then run
 
 ```bash
     make cluster-sync # synchronize with your code, if necessary
@@ -183,20 +194,20 @@ Finally start a VMI called `vmi-ephemeral`:
     # This can be done from your GIT repo, no need to log into a VMI
 
     # Create a VMI
-    ./cluster/kubectl.sh create -f cluster/examples/vmi-ephemeral.yaml
+    ./cluster-up/kubectl.sh create -f examples/vmi-ephemeral.yaml
 
     # Sure? Let's list all created VMIs
-    ./cluster/kubectl.sh get vmis
+    ./cluster-up/kubectl.sh get vmis
 
     # Enough, let's get rid of it
-    ./cluster/kubectl.sh delete -f cluster/examples/vmi-ephemeral.yaml
+    ./cluster-up/kubectl.sh delete -f examples/vmi-ephemeral.yaml
 
 
     # You can actually use kubelet.sh to introspect the cluster in general
-    ./cluster/kubectl.sh get pods
+    ./cluster-up/kubectl.sh get pods
 
     # To check the running kubevirt services you need to introspect the `kubevirt` namespace:
-    ./cluster/kubectl.sh -n kubevirt get pods
+    ./cluster-up/kubectl.sh -n kubevirt get pods
 ```
 
 This will start a VMI on master or one of the running nodes with a macvtap and a
@@ -205,18 +216,18 @@ tap networking device attached.
 #### Example
 
 ```bash
-$ ./cluster/kubectl.sh create -f cluster/examples/vmi-ephemeral.yaml
+$ ./cluster-up/kubectl.sh create -f examples/vmi-ephemeral.yaml
 vm "vmi-ephemeral" created
 
-$ ./cluster/kubectl.sh get pods
+$ ./cluster-up/kubectl.sh get pods
 NAME                              READY     STATUS    RESTARTS   AGE
 virt-launcher-vmi-ephemeral9q7es  1/1       Running   0          10s
 
-$ ./cluster/kubectl.sh get vmis
+$ ./cluster-up/kubectl.sh get vmis
 NAME           LABELS                        DATA
 vmi-ephemera    kubevirt.io/nodeName=node01   {"apiVersion":"kubevirt.io/v1alpha2","kind":"VMI","...
 
-$ ./cluster/kubectl.sh get vmis -o json
+$ ./cluster-up/kubectl.sh get vmis -o json
 {
     "kind": "List",
     "apiVersion": "v1",
@@ -254,12 +265,12 @@ to add virt-viewer installation folder to their `PATH`.
 Then, after you made sure that the VMI `vmi-ephemeral` is running, type
 
 ```
-cluster/virtctl.sh vnc vmi-ephemeral
+cluster-up/virtctl.sh vnc vmi-ephemeral
 ```
 
 to start a remote session with `remote-viewer`.
 
-`cluster/virtctl.sh` is a wrapper around `virtctl`. `virtctl` brings all
+`cluster-up/virtctl.sh` is a wrapper around `virtctl`. `virtctl` brings all
 virtual machine specific commands with it and is a supplement to `kubectl`.
 
 **Note:** If accessing your cluster through ssh, be sure to forward your X11 session in order to launch `virtctl vnc`.

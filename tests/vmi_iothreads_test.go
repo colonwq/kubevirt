@@ -21,7 +21,7 @@ package tests_test
 
 import (
 	"encoding/xml"
-	"flag"
+
 	"fmt"
 
 	. "github.com/onsi/ginkgo"
@@ -32,14 +32,14 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/kubevirt/pkg/virt-launcher/virtwrap/api"
 	"kubevirt.io/kubevirt/tests"
 )
 
 var _ = Describe("IOThreads", func() {
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -53,6 +53,8 @@ var _ = Describe("IOThreads", func() {
 	})
 
 	Context("IOThreads Policies", func() {
+
+		availableCPUs := tests.GetHighestCPUNumberAmongNodes(virtClient)
 
 		It("Should honor shared ioThreadsPolicy for single disk", func() {
 			policy := v1.IOThreadsPolicyShared
@@ -131,6 +133,10 @@ var _ = Describe("IOThreads", func() {
 		})
 
 		table.DescribeTable("[ref_id:2065] should honor auto ioThreadPolicy", func(numCpus int, expectedIOThreads int) {
+			Expect(numCpus).To(BeNumerically("<=", availableCPUs),
+				fmt.Sprintf("Testing environment only has nodes with %d CPUs available, but required are %d CPUs", availableCPUs, numCpus),
+			)
+
 			policy := v1.IOThreadsPolicyAuto
 			vmi.Spec.Domain.IOThreadsPolicy = &policy
 

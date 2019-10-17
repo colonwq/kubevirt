@@ -20,9 +20,9 @@ import (
 	fakek8sclient "k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/testing"
 
+	"kubevirt.io/client-go/kubecli"
 	cdiv1 "kubevirt.io/containerized-data-importer/pkg/apis/core/v1alpha1"
 	fakecdiclient "kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned/fake"
-	"kubevirt.io/kubevirt/pkg/kubecli"
 	"kubevirt.io/kubevirt/pkg/virtctl/imageupload"
 	"kubevirt.io/kubevirt/tests"
 )
@@ -118,7 +118,7 @@ var _ = Describe("ImageUpload", func() {
 		})
 	}
 
-	validatePVC := func() {
+	validateModePVC := func(blockMode bool) {
 		pvc, err := kubeClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(pvcName, metav1.GetOptions{})
 		Expect(err).To(BeNil())
 
@@ -128,6 +128,23 @@ var _ = Describe("ImageUpload", func() {
 
 		_, ok = pvc.Annotations[uploadRequestAnnotation]
 		Expect(ok).To(BeTrue())
+
+		volumeMode := v1.PersistentVolumeFilesystem
+		if blockMode {
+			volumeMode = v1.PersistentVolumeBlock
+		}
+		// pvc.Spec.VolumeMode is not always set, ignore when Filesystem is expected
+		if pvc.Spec.VolumeMode != nil || blockMode {
+			Expect(pvc.Spec.VolumeMode).To(Equal(&volumeMode))
+		}
+	}
+
+	validatePVC := func() {
+		validateModePVC(false)
+	}
+
+	validateBlockPVC := func() {
+		validateModePVC(true)
 	}
 
 	createEndpoints := func() *v1.Endpoints {
@@ -259,10 +276,19 @@ var _ = Describe("ImageUpload", func() {
 			validatePVC()
 		})
 
+		It("Create a VolumeMode=Block PVC", func() {
+			testInit(http.StatusOK)
+			cmd := tests.NewRepeatableVirtctlCommand(commandName, "--pvc-name", pvcName, "--pvc-size", pvcSize,
+				"--insecure", "--image-path", imagePath, "--block-volume")
+			Expect(cmd()).To(BeNil())
+			Expect(createCalled).To(BeTrue())
+			validateBlockPVC()
+		})
+
 		DescribeTable("PVC does exist", func(pvc *v1.PersistentVolumeClaim) {
 			testInit(http.StatusOK, pvc)
 			cmd := tests.NewRepeatableVirtctlCommand(commandName, "--no-create", "--pvc-name", pvcName,
-				"--uploadproxy-url", server.URL, "--insecure", "--image-path", imagePath)
+				"--uploadproxy-url", server.URL, "--pvc-size", pvcSize, "--insecure", "--image-path", imagePath)
 			Expect(cmd()).To(BeNil())
 			Expect(createCalled).To(BeFalse())
 			validatePVC()
@@ -312,6 +338,7 @@ var _ = Describe("ImageUpload", func() {
 			Entry("No args", []string{"--pvc-name", pvcName, "--pvc-size", pvcSize, "--uploadproxy-url", "https://doesnotexist", "--insecure", "--image-path", imagePath}),
 			Entry("No name", []string{"--pvc-size", pvcSize, "--uploadproxy-url", "https://doesnotexist", "--insecure", "--image-path", imagePath}),
 			Entry("No size", []string{"--pvc-name", pvcName, "--uploadproxy-url", "https://doesnotexist", "--insecure", "--image-path", imagePath}),
+			Entry("Size invalid", []string{"--pvc-name", pvcName, "--pvc-size", "$$$$$", "--uploadproxy-url", "https://doesnotexist", "--insecure", "--image-path", imagePath}),
 			Entry("No image path", []string{"--pvc-name", pvcName, "--pvc-size", pvcSize, "--uploadproxy-url", "https://doesnotexist", "--insecure"}),
 		)
 

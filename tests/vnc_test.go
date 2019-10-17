@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,16 +31,16 @@ import (
 	. "github.com/onsi/gomega"
 	"k8s.io/client-go/rest"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
-	"kubevirt.io/kubevirt/pkg/log"
-	"kubevirt.io/kubevirt/pkg/util/subresources"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
+	"kubevirt.io/client-go/log"
+	"kubevirt.io/client-go/subresources"
 	"kubevirt.io/kubevirt/tests"
 )
 
 var _ = Describe("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:component]VNC", func() {
 
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -67,7 +66,7 @@ var _ = Describe("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				readStop := make(chan string)
 
 				go func() {
-					GinkgoRecover()
+					defer GinkgoRecover()
 					vnc, err := virtClient.VirtualMachineInstance(vmi.ObjectMeta.Namespace).VNC(vmi.ObjectMeta.Name)
 					if err != nil {
 						k8ResChan <- err
@@ -82,7 +81,7 @@ var _ = Describe("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 				// write to FD <- pipeOutReader
 				By("Reading from the VNC socket")
 				go func() {
-					GinkgoRecover()
+					defer GinkgoRecover()
 					buf := make([]byte, 1024, 1024)
 					// reading qemu vnc server
 					n, err := pipeOutReader.Read(buf)
@@ -97,29 +96,21 @@ var _ = Describe("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 					readStop <- string(buf[0:n])
 				}()
 
-				response := ""
-
 				select {
-				case response = <-readStop:
+				case response := <-readStop:
+					// This is the response capture by wireshark when the VNC server is contacted.
+					// This verifies that the test is able to establish a connection with VNC and
+					// communicate.
+					By("Checking the response from VNC server")
+					Expect(response).To(Equal("RFB 003.008\n"))
 				case err = <-k8ResChan:
 					Expect(err).ToNot(HaveOccurred())
 				case <-time.After(45 * time.Second):
 					Fail("Timout reached while waiting for valid VNC server response")
 				}
-
-				// This is the response capture by wireshark when the VNC server is contacted.
-				// This verifies that the test is able to establish a connection with VNC and
-				// communicate.
-				By("Checking the response from VNC server")
-				Expect(response).To(Equal("RFB 003.008\n"))
-				Expect(err).To(BeNil())
 			}
 
-			It("[test_id:1611]should allow accessing the VNC device", func() {
-				vncConnect()
-			})
-
-			It("should allow accessing the VNC device multiple times", func() {
+			It("[test_id:1611]should allow accessing the VNC device multiple times", func() {
 
 				for i := 0; i < 10; i++ {
 					vncConnect()
@@ -137,6 +128,7 @@ var _ = Describe("[rfe_id:127][crit:medium][vendor:cnv-qe@redhat.com][level:comp
 			wrappedRoundTripper, err := rest.HTTPWrappersForConfig(config, rt)
 			Expect(err).ToNot(HaveOccurred())
 			req, err := kubecli.RequestFromConfig(config, vmi.Name, vmi.Namespace, subresource)
+			Expect(err).ToNot(HaveOccurred())
 
 			// Add an Origin header to look more like an arbitrary browser
 			if req.Header == nil {

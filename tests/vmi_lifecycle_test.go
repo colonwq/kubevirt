@@ -20,7 +20,6 @@
 package tests_test
 
 import (
-	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -41,8 +40,8 @@ import (
 	"kubevirt.io/kubevirt/pkg/controller"
 	device_manager "kubevirt.io/kubevirt/pkg/virt-handler/device-manager"
 
-	v1 "kubevirt.io/kubevirt/pkg/api/v1"
-	"kubevirt.io/kubevirt/pkg/kubecli"
+	v1 "kubevirt.io/client-go/api/v1"
+	"kubevirt.io/client-go/kubecli"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch"
@@ -74,7 +73,7 @@ func addNodeAffinityToVMI(vmi *v1.VirtualMachineInstance, nodeName string) {
 
 var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:component]VMIlifecycle", func() {
 
-	flag.Parse()
+	tests.FlagParse()
 
 	virtClient, err := kubecli.GetKubevirtClient()
 	tests.PanicOnError(err)
@@ -119,6 +118,38 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Should(ContainSubstring("Found PID for"))
 		})
 
+		It("should carry annotations to pod", func() {
+			vmi.Annotations = map[string]string{
+				"testannotation": "test",
+			}
+
+			vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).To(BeNil(), "Create VMI successfully")
+			tests.WaitForSuccessfulVMIStart(vmi)
+
+			pod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(pod).NotTo(BeNil())
+
+			Expect(pod.Annotations).To(HaveKeyWithValue("testannotation", "test"), "annotation should be carried to the pod")
+		})
+
+		It("should not carry kubernetes and kubevirt annotations to pod", func() {
+			vmi.Annotations = map[string]string{
+				"kubevirt.io/test":   "test",
+				"kubernetes.io/test": "test",
+			}
+
+			vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).To(BeNil(), "Create VMI successfully")
+			tests.WaitForSuccessfulVMIStart(vmi)
+
+			pod := tests.GetRunningPodByVirtualMachineInstance(vmi, vmi.Namespace)
+			Expect(pod).NotTo(BeNil())
+
+			Expect(pod.Annotations).ToNot(HaveKey("kubevirt.io/test"), "kubevirt annotation should not be carried to the pod")
+			Expect(pod.Annotations).ToNot(HaveKey("kubernetes.io/test"), "kubernetes annotation should not be carried to the pod")
+		})
+
 		It("[test_id:1622]should log libvirtd logs", func() {
 			vmi, err := virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
 			Expect(err).To(BeNil(), "Create VMI successfully")
@@ -135,6 +166,33 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				500*time.Millisecond).
 				Should(And(ContainSubstring("internal error: Cannot probe for supported suspend types"), ContainSubstring(`"subcomponent":"libvirt"`)))
 		})
+
+		It("should log libvirtd debug logs when enabled", func() {
+			var err error
+			vmi := tests.NewRandomVMI()
+			vmi.Labels = map[string]string{
+				"debugLogs": "true",
+			}
+
+			vmi, err = virtClient.VirtualMachineInstance(tests.NamespaceTestDefault).Create(vmi)
+			Expect(err).To(BeNil(), "Create VMI successfully")
+			tests.WaitForSuccessfulVMIStart(vmi)
+
+			By("Getting virt-launcher logs")
+			logs := func() string { return getVirtLauncherLogs(virtClient, vmi) }
+
+			// there are plenty of strings we can use to identify the debug logs. Here we use something easy to see...
+			Eventually(logs,
+				11*time.Second,
+				500*time.Millisecond).
+				Should(ContainSubstring("OBJECT_REF"))
+			// ...and something we deeply care about when in debug mode.
+			Eventually(logs,
+				2*time.Second,
+				500*time.Millisecond).
+				Should(And(ContainSubstring("QEMU_MONITOR_SEND_MSG"), ContainSubstring(`"subcomponent":"libvirt"`)))
+		})
+
 		It("[test_id:1623]should reject POST if validation webhook deems the spec invalid", func() {
 
 			// Add a disk that doesn't map to a volume.
@@ -281,7 +339,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 							}
 						}
 						return false
-					})
+					}, fmt.Sprintf("two events of type Warning, reason = %s", v1.SyncFailed.String()))
 				})
 
 				It("[test_id:1630]should log warning and proceed once the secret is there", func() {
@@ -385,14 +443,16 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				// Give virt-handler some time. It can greatly vary when virt-handler will be ready again
 				stopChan := make(chan struct{})
 				defer close(stopChan)
-				tests.NewObjectEventWatcher(vmi).Timeout(120*time.Second).SinceWatchedObjectResourceVersion().WaitFor(stopChan, tests.WarningEvent, v1.Stopped)
 
 				By("Checking that VirtualMachineInstance has 'Failed' phase")
 				Eventually(func() v1.VirtualMachineInstancePhase {
 					vmi, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 					Expect(err).ToNot(HaveOccurred(), "Should get VMI successfully")
 					return vmi.Status.Phase
-				}(), 10, 1).Should(Equal(v1.Failed), "VMI should be failed")
+				}, 240*time.Second, 1*time.Second).Should(Equal(v1.Failed), "VMI should be failed")
+
+				By(fmt.Sprintf("Waiting for %q %q event after the resource version %q", tests.WarningEvent, v1.Stopped, vmi.ResourceVersion))
+				tests.NewObjectEventWatcher(vmi).Timeout(60*time.Second).SinceWatchedObjectResourceVersion().WaitFor(stopChan, tests.WarningEvent, v1.Stopped)
 
 				By("checking that it can still start VMIs")
 				newVMI := newCirrosVMI()
@@ -443,7 +503,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				nodeName := tests.WaitForSuccessfulVMIStart(vmi)
 
 				By("triggering a device plugin re-registration on that node")
-				pod, err := kubecli.NewVirtHandlerClient(virtClient).ForNode(nodeName).Pod()
+				pod, err := kubecli.NewVirtHandlerClient(virtClient).Namespace(tests.KubeVirtInstallNamespace).ForNode(nodeName).Pod()
 				Expect(err).ToNot(HaveOccurred())
 
 				_, _, err = tests.ExecuteCommandOnPodV2(virtClient, pod,
@@ -458,7 +518,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Expect(err).ToNot(HaveOccurred())
 
 				By("checking if we see the device plugin restart in the logs")
-				virtHandlerPod, err := kubecli.NewVirtHandlerClient(virtClient).ForNode(nodeName).Pod()
+				virtHandlerPod, err := kubecli.NewVirtHandlerClient(virtClient).Namespace(tests.KubeVirtInstallNamespace).ForNode(nodeName).Pod()
 				Expect(err).ToNot(HaveOccurred(), "Should get virthandler client for node")
 
 				handlerName := virtHandlerPod.GetObjectMeta().GetName()
@@ -504,7 +564,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				vmi, err = virtClient.VirtualMachineInstance(vmi.Namespace).Create(vmi)
 				Expect(err).ToNot(HaveOccurred(), "Should create VMI successfully")
 				nodeName = tests.WaitForSuccessfulVMIStart(vmi)
-				virtHandler, err = kubecli.NewVirtHandlerClient(virtClient).ForNode(nodeName).Pod()
+				virtHandler, err = kubecli.NewVirtHandlerClient(virtClient).Namespace(tests.KubeVirtInstallNamespace).ForNode(nodeName).Pod()
 				Expect(err).ToNot(HaveOccurred(), "Should get virthandler client")
 				ds, err := virtClient.AppsV1().DaemonSets(virtHandler.Namespace).Get("virt-handler", metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred(), "Should get virthandler daemonset")
@@ -581,7 +641,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 						ds.Status.DesiredNumberScheduled == virtHandlerAvailablePods &&
 						ds.Status.NumberReady == virtHandlerAvailablePods &&
 						ds.Status.UpdatedNumberScheduled == virtHandlerAvailablePods
-				}, 120*time.Second, 1*time.Second).Should(Equal(true), "Virthandler should be ready to work")
+				}, 120*time.Second, 1*time.Second).Should(BeTrue(), "Virthandler should be ready to work")
 			})
 		})
 
@@ -701,7 +761,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			var originalData map[string]string
 			var options metav1.GetOptions
 			var defaultCPUModelKey = "default-cpu-model"
-			var defaultCPUModel = "Conroe"
+			var defaultCPUModel = "Nehalem"
 			var vmiCPUModel = "SandyBridge"
 
 			//store old kubevirt-config
@@ -722,14 +782,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 			})
 
 			It("should set default cpu model when vmi doesn't have it set", func() {
-				cfgMap, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Get(kubevirtConfig, options)
-				Expect(err).ToNot(HaveOccurred(), "Expect config map to be loaded without error")
-
-				cfgMap.Data[defaultCPUModelKey] = defaultCPUModel
-				_, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Update(cfgMap)
-				Expect(err).ToNot(HaveOccurred(), "Expect config map to be updated without error")
-
-				time.Sleep(5 * time.Second)
+				tests.UpdateClusterConfigValueAndWait(defaultCPUModelKey, defaultCPUModel)
 
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(tests.ContainerDiskFor(tests.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 
@@ -739,20 +792,12 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 
 				curVMI, err := virtClient.VirtualMachineInstance(vmi.Namespace).Get(vmi.Name, &metav1.GetOptions{})
 				Expect(err).ToNot(HaveOccurred(), "Should get VMI")
-				Expect(curVMI.Spec.Domain.CPU.Model).To(Equal("Conroe"), "Expected default CPU model")
+				Expect(curVMI.Spec.Domain.CPU.Model).To(Equal("Nehalem"), "Expected default CPU model")
 
 			})
 
 			It("should not set default cpu model when vmi has it set", func() {
-				cfgMap, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Get(kubevirtConfig, options)
-				Expect(err).ToNot(HaveOccurred(), "Expect config map to be loaded without error")
-
-				cfgMap.Data[defaultCPUModelKey] = defaultCPUModel
-
-				_, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Update(cfgMap)
-				Expect(err).ToNot(HaveOccurred(), "Expect config map to be updated without error")
-
-				time.Sleep(5 * time.Second)
+				tests.UpdateClusterConfigValueAndWait(defaultCPUModelKey, defaultCPUModel)
 
 				vmi := tests.NewRandomVMIWithEphemeralDiskAndUserdata(tests.ContainerDiskFor(tests.ContainerDiskCirros), "#!/bin/bash\necho 'hello'\n")
 				vmi.Spec.Domain.CPU = &v1.CPU{
@@ -799,24 +844,20 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				cfgMap, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Get(kubevirtConfig, options)
 				Expect(err).ToNot(HaveOccurred())
 				originalFeatureGates = cfgMap.Data[virtconfig.FeatureGatesKey]
-				cfgMap.Data[virtconfig.FeatureGatesKey] = virtconfig.CPUNodeDiscoveryGate
-				_, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Update(cfgMap)
-				Expect(err).ToNot(HaveOccurred())
-				time.Sleep(5 * time.Second)
+
+				tests.UpdateClusterConfigValueAndWait(virtconfig.FeatureGatesKey, virtconfig.CPUNodeDiscoveryGate)
 			})
 
 			AfterEach(func() {
-				cfgMap, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Get(kubevirtConfig, options)
+				tests.UpdateClusterConfigValueAndWait(virtconfig.FeatureGatesKey, originalFeatureGates)
+
 				Expect(err).ToNot(HaveOccurred())
-				cfgMap.Data[virtconfig.FeatureGatesKey] = originalFeatureGates
-				_, err = virtClient.CoreV1().ConfigMaps(tests.KubeVirtInstallNamespace).Update(cfgMap)
+				labelBytes, err := json.Marshal(originalLabels)
 				Expect(err).ToNot(HaveOccurred())
 
-				n, err := virtClient.CoreV1().Nodes().Get(node.Name, metav1.GetOptions{})
-				Expect(err).ToNot(HaveOccurred())
-				n.SetLabels(originalLabels)
-				_, err = virtClient.CoreV1().Nodes().Update(n)
-				Expect(err).ToNot(HaveOccurred())
+				node, err = virtClient.CoreV1().Nodes().Patch(node.Name, types.StrategicMergePatchType,
+					[]byte(fmt.Sprintf(`{"metadata": { "labels": %s}}`, labelBytes)))
+				Expect(err).ToNot(HaveOccurred(), "Should patch node successfully")
 
 				time.Sleep(5 * time.Second)
 			})
@@ -1008,7 +1049,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 
 				By("Creating a VirtualMachineInstance with different namespace")
 				vmi = tests.NewRandomVMIWithNS(namespace)
-				virtHandlerPod, err := kubecli.NewVirtHandlerClient(virtClient).ForNode(node).Pod()
+				virtHandlerPod, err := kubecli.NewVirtHandlerClient(virtClient).Namespace(tests.KubeVirtInstallNamespace).ForNode(node).Pod()
 				Expect(err).ToNot(HaveOccurred(), "Should get virthandler client for node")
 
 				handlerName := virtHandlerPod.GetObjectMeta().GetName()
@@ -1382,7 +1423,7 @@ var _ = Describe("[rfe_id:273][crit:high][vendor:cnv-qe@redhat.com][level:compon
 				Expect(nodes.Items).ToNot(BeEmpty(), "There should be some compute node")
 				node := nodes.Items[0].Name
 
-				virtHandlerPod, err := kubecli.NewVirtHandlerClient(virtClient).ForNode(node).Pod()
+				virtHandlerPod, err := kubecli.NewVirtHandlerClient(virtClient).Namespace(tests.KubeVirtInstallNamespace).ForNode(node).Pod()
 				Expect(err).ToNot(HaveOccurred(), "Should get virthandler for node")
 
 				handlerName := virtHandlerPod.GetObjectMeta().GetName()
