@@ -44,6 +44,23 @@ func SetDefaults_FeatureState(obj *FeatureState) {
 	}
 }
 
+func SetDefaults_FeatureIpmi(obj *FeatureIpmi) {
+	if obj.Enabled == nil {
+		obj.Enabled = _false
+	}
+	if obj.Enabled == _true {
+		if obj.Port == nil {
+			obj.Port = ui32(6230)
+		}
+		if obj.Username == "" {
+			obj.Username = "admin"
+		}
+		if obj.Password == "" {
+			obj.Password = "Ch4ng3m3"
+		}
+	}
+}
+
 func SetDefaults_FeatureAPIC(obj *FeatureAPIC) {
 	if obj.Enabled == nil {
 		obj.Enabled = _true

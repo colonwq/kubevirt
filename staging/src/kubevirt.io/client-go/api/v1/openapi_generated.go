@@ -54,6 +54,7 @@ func GetOpenAPIDefinitions(ref common.ReferenceCallback) map[string]common.OpenA
 		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.EphemeralVolumeSource":                     schema_kubevirtio_client_go_api_v1_EphemeralVolumeSource(ref),
 		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureAPIC":                               schema_kubevirtio_client_go_api_v1_FeatureAPIC(ref),
 		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureHyperv":                             schema_kubevirtio_client_go_api_v1_FeatureHyperv(ref),
+		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureIpmi":                               schema_kubevirtio_client_go_api_v1_FeatureIpmi(ref),
 		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureSpinlocks":                          schema_kubevirtio_client_go_api_v1_FeatureSpinlocks(ref),
 		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureState":                              schema_kubevirtio_client_go_api_v1_FeatureState(ref),
 		"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureVendorID":                           schema_kubevirtio_client_go_api_v1_FeatureVendorID(ref),
@@ -949,7 +950,7 @@ func schema_kubevirtio_client_go_api_v1_DomainSpec(ref common.ReferenceCallback)
 					},
 					"features": {
 						SchemaProps: spec.SchemaProps{
-							Description: "Features like acpi, apic, hyperv, smm.",
+							Description: "Features like acpi, ipmi, apic, hyperv, smm.",
 							Ref:         ref("kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.Features"),
 						},
 					},
@@ -1157,6 +1158,42 @@ func schema_kubevirtio_client_go_api_v1_FeatureHyperv(ref common.ReferenceCallba
 	}
 }
 
+func schema_kubevirtio_client_go_api_v1_FeatureIpmi(ref common.ReferenceCallback) common.OpenAPIDefinition {
+	return common.OpenAPIDefinition{
+		Schema: spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Properties: map[string]spec.Schema{
+					"enabled": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"boolean"},
+							Format: "",
+						},
+					},
+					"port": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"integer"},
+							Format: "int64",
+						},
+					},
+					"username": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+					"password": {
+						SchemaProps: spec.SchemaProps{
+							Type:   []string{"string"},
+							Format: "",
+						},
+					},
+				},
+			},
+		},
+		Dependencies: []string{},
+	}
+}
+
 func schema_kubevirtio_client_go_api_v1_FeatureSpinlocks(ref common.ReferenceCallback) common.OpenAPIDefinition {
 	return common.OpenAPIDefinition{
 		Schema: spec.Schema{
@@ -1240,6 +1277,12 @@ func schema_kubevirtio_client_go_api_v1_Features(ref common.ReferenceCallback) c
 							Ref:         ref("kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureState"),
 						},
 					},
+					"ipmi": {
+						SchemaProps: spec.SchemaProps{
+							Description: "IPMI enables/disables IPMI managment of a guest. Defaults to disabled. (Eventually)",
+							Ref:         ref("kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureIpmi"),
+						},
+					},
 					"apic": {
 						SchemaProps: spec.SchemaProps{
 							Description: "Defaults to the machine type setting.",
@@ -1262,7 +1305,7 @@ func schema_kubevirtio_client_go_api_v1_Features(ref common.ReferenceCallback) c
 			},
 		},
 		Dependencies: []string{
-			"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureAPIC", "kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureHyperv", "kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureState"},
+			"kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureAPIC", "kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureHyperv", "kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureIpmi", "kubevirt.io/kubevirt/staging/src/kubevirt.io/client-go/api/v1.FeatureState"},
 	}
 }
 

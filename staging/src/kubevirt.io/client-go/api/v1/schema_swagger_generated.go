@@ -66,7 +66,7 @@ func (DomainSpec) SwaggerDoc() map[string]string {
 		"machine":         "Machine type.\n+optional",
 		"firmware":        "Firmware.\n+optional",
 		"clock":           "Clock sets the clock and timers of the vmi.\n+optional",
-		"features":        "Features like acpi, apic, hyperv, smm.\n+optional",
+		"features":        "Features like acpi, ipmi, apic, hyperv, smm.\n+optional",
 		"devices":         "Devices allows adding disks, network interfaces, ...",
 		"ioThreadsPolicy": "Controls whether or not disks will share IOThreads.\nOmitting IOThreadsPolicy disables use of IOThreads.\nOne of: shared, auto\n+optional",
 		"chassis":         "Chassis specifies the chassis info passed to the domain.\n+optional",
@@ -358,6 +358,7 @@ func (HypervTimer) SwaggerDoc() map[string]string {
 func (Features) SwaggerDoc() map[string]string {
 	return map[string]string{
 		"acpi":   "ACPI enables/disables ACPI insidejsondata guest.\nDefaults to enabled.\n+optional",
+		"ipmi":   "IPMI enables/disables IPMI managment of a guest.\nDefaults to disabled. (Eventually)\n+optional",
 		"apic":   "Defaults to the machine type setting.\n+optional",
 		"hyperv": "Defaults to the machine type setting.\n+optional",
 		"smm":    "SMM enables/disables System Management Mode.\nTSEG not yet implemented.\n+optional",
@@ -368,6 +369,16 @@ func (FeatureState) SwaggerDoc() map[string]string {
 	return map[string]string{
 		"":        "Represents if a feature is enabled or disabled.",
 		"enabled": "Enabled determines if the feature should be enabled or disabled on the guest.\nDefaults to true.\n+optional",
+	}
+}
+
+func (FeatureIpmi) SwaggerDoc() map[string]string {
+	return map[string]string{
+		"":         "+k8s:openapi-gen=true",
+		"enabled":  "+optional",
+		"port":     "+optional",
+		"username": "+optional",
+		"password": "+optional",
 	}
 }
 

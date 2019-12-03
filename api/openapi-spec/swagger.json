@@ -4580,7 +4580,7 @@
       "$ref": "#/definitions/v1.Devices"
      },
      "features": {
-      "description": "Features like acpi, apic, hyperv, smm.\n+optional",
+      "description": "Features like acpi, ipmi, apic, hyperv, smm.\n+optional",
       "$ref": "#/definitions/v1.Features"
      },
      "firmware": {
@@ -4702,6 +4702,27 @@
      }
     }
    },
+   "v1.FeatureIpmi": {
+    "description": "+k8s:openapi-gen=true",
+    "properties": {
+     "enabled": {
+      "description": "+optional",
+      "type": "boolean"
+     },
+     "password": {
+      "description": "+optional",
+      "type": "string"
+     },
+     "port": {
+      "description": "+optional",
+      "type": "integer"
+     },
+     "username": {
+      "description": "+optional",
+      "type": "string"
+     }
+    }
+   },
    "v1.FeatureSpinlocks": {
     "properties": {
      "enabled": {
@@ -4748,6 +4769,10 @@
      "hyperv": {
       "description": "Defaults to the machine type setting.\n+optional",
       "$ref": "#/definitions/v1.FeatureHyperv"
+     },
+     "ipmi": {
+      "description": "IPMI enables/disables IPMI managment of a guest.\nDefaults to disabled. (Eventually)\n+optional",
+      "$ref": "#/definitions/v1.FeatureIpmi"
      },
      "smm": {
       "description": "SMM enables/disables System Management Mode.\nTSEG not yet implemented.\n+optional",

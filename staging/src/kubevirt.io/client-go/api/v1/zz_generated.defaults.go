@@ -73,6 +73,9 @@ func SetObjectDefaults_VirtualMachine(in *VirtualMachine) {
 		}
 		if in.Spec.Template.Spec.Domain.Features != nil {
 			SetDefaults_FeatureState(&in.Spec.Template.Spec.Domain.Features.ACPI)
+			if in.Spec.Template.Spec.Domain.Features.Ipmi != nil {
+				SetDefaults_FeatureIpmi(in.Spec.Template.Spec.Domain.Features.Ipmi)
+			}
 			if in.Spec.Template.Spec.Domain.Features.APIC != nil {
 				SetDefaults_FeatureAPIC(in.Spec.Template.Spec.Domain.Features.APIC)
 			}
@@ -169,6 +172,9 @@ func SetObjectDefaults_VirtualMachineInstance(in *VirtualMachineInstance) {
 	}
 	if in.Spec.Domain.Features != nil {
 		SetDefaults_FeatureState(&in.Spec.Domain.Features.ACPI)
+		if in.Spec.Domain.Features.Ipmi != nil {
+			SetDefaults_FeatureIpmi(in.Spec.Domain.Features.Ipmi)
+		}
 		if in.Spec.Domain.Features.APIC != nil {
 			SetDefaults_FeatureAPIC(in.Spec.Domain.Features.APIC)
 		}
@@ -271,6 +277,9 @@ func SetObjectDefaults_VirtualMachineInstancePreset(in *VirtualMachineInstancePr
 		}
 		if in.Spec.Domain.Features != nil {
 			SetDefaults_FeatureState(&in.Spec.Domain.Features.ACPI)
+			if in.Spec.Domain.Features.Ipmi != nil {
+				SetDefaults_FeatureIpmi(in.Spec.Domain.Features.Ipmi)
+			}
 			if in.Spec.Domain.Features.APIC != nil {
 				SetDefaults_FeatureAPIC(in.Spec.Domain.Features.APIC)
 			}
@@ -374,6 +383,9 @@ func SetObjectDefaults_VirtualMachineInstanceReplicaSet(in *VirtualMachineInstan
 		}
 		if in.Spec.Template.Spec.Domain.Features != nil {
 			SetDefaults_FeatureState(&in.Spec.Template.Spec.Domain.Features.ACPI)
+			if in.Spec.Template.Spec.Domain.Features.Ipmi != nil {
+				SetDefaults_FeatureIpmi(in.Spec.Template.Spec.Domain.Features.Ipmi)
+			}
 			if in.Spec.Template.Spec.Domain.Features.APIC != nil {
 				SetDefaults_FeatureAPIC(in.Spec.Template.Spec.Domain.Features.APIC)
 			}

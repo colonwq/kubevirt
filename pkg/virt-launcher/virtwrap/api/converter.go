@@ -531,6 +531,15 @@ func Convert_v1_Features_To_api_Features(source *v1.Features, features *Features
 			features.APIC = &FeatureEnabled{}
 		}
 	}
+	if source.Ipmi != nil {
+		if source.Ipmi.Enabled == nil || *source.Ipmi.Enabled {
+			features.Ipmi = &FeatureIpmi{}
+			err := Convert_v1_FeatureIpmi_To_api_FeatureIpmi(source.Ipmi, features.Ipmi, c)
+			if err != nil {
+				return nil
+			}
+		}
+	}
 	if source.Hyperv != nil {
 		features.Hyperv = &FeatureHyperv{}
 		err := Convert_v1_FeatureHyperv_To_api_FeatureHyperv(source.Hyperv, features.Hyperv, c)
@@ -544,6 +553,23 @@ func Convert_v1_Features_To_api_Features(source *v1.Features, features *Features
 func Convert_v1_Machine_To_api_OSType(source *v1.Machine, ost *OSType, c *ConverterContext) error {
 	ost.Machine = source.Type
 
+	return nil
+}
+
+func Convert_v1_FeatureIpmi_To_api_FeatureIpmi(source *v1.FeatureIpmi, dest *FeatureIpmi, c *ConverterContext) error {
+	//XXX HERE BE DRAGONS
+	// set port
+	if source.Port != nil {
+		dest.Port = source.Port
+	}
+	// set username
+	if source.Username != "" {
+		dest.Username = source.Username
+	}
+	// set password
+	if source.Password != "" {
+		dest.Password = source.Password
+	}
 	return nil
 }
 

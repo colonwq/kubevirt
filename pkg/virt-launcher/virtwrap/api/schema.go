@@ -188,9 +188,17 @@ type CPUTopology struct {
 
 type Features struct {
 	ACPI   *FeatureEnabled `xml:"acpi,omitempty"`
+	Ipmi   *FeatureIpmi    `xml:"ipmi,omitempty"`
 	APIC   *FeatureEnabled `xml:"apic,omitempty"`
 	Hyperv *FeatureHyperv  `xml:"hyperv,omitempty"`
 	SMM    *FeatureEnabled `xml:"smm,omitempty"`
+}
+
+type FeatureIpmi struct {
+	Enabled  bool    `xml:"enabled,omitempty"`
+	Port     *uint32 `xml:"port,omitempty"`
+	Username string  `xml:"username,omitempty"`
+	Password string  `xml:"password,omitempty"`
 }
 
 type FeatureHyperv struct {

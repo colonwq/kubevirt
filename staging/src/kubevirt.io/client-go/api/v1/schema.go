@@ -160,7 +160,7 @@ type DomainSpec struct {
 	// Clock sets the clock and timers of the vmi.
 	// +optional
 	Clock *Clock `json:"clock,omitempty"`
-	// Features like acpi, apic, hyperv, smm.
+	// Features like acpi, ipmi, apic, hyperv, smm.
 	// +optional
 	Features *Features `json:"features,omitempty"`
 	// Devices allows adding disks, network interfaces, ...
@@ -759,6 +759,10 @@ type Features struct {
 	// Defaults to enabled.
 	// +optional
 	ACPI FeatureState `json:"acpi,omitempty"`
+	// IPMI enables/disables IPMI managment of a guest.
+	// Defaults to disabled. (Eventually)
+	// +optional
+	Ipmi *FeatureIpmi `json:"ipmi,omitempty"`
 	// Defaults to the machine type setting.
 	// +optional
 	APIC *FeatureAPIC `json:"apic,omitempty"`
@@ -779,6 +783,18 @@ type FeatureState struct {
 	// Defaults to true.
 	// +optional
 	Enabled *bool `json:"enabled,omitempty"`
+}
+
+// +k8s:openapi-gen=true
+type FeatureIpmi struct {
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// +optional
+	Port *uint32 `json:"port,omitempty"`
+	// +optional
+	Username string `json:"username,omitempty"`
+	// +optional
+	Password string `json:"password,omitempty"`
 }
 
 // ---
